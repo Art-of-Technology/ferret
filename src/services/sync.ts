@@ -8,6 +8,7 @@
 // failure. We treat those as opaque — surface the typed error, log it,
 // continue to the next connection.
 
+import type consola from 'consola';
 import type { BunSQLiteDatabase } from 'drizzle-orm/bun-sqlite';
 import { db as defaultDb } from '../db/client';
 import {
@@ -69,12 +70,13 @@ export interface SyncContext {
   logger?: SyncLogger;
 }
 
-export interface SyncLogger {
-  info(msg: string): void;
-  warn(msg: string): void;
-  error(msg: string): void;
-  success(msg: string): void;
-}
+/**
+ * Structural subset of `consola` that the orchestrator actually uses. Typing
+ * it via `Pick` keeps the real `consola` instance assignable without an
+ * adapter wrapper at the call site, while still letting tests pass a tiny
+ * mock with just these four methods.
+ */
+export type SyncLogger = Pick<typeof consola, 'info' | 'warn' | 'error' | 'success'>;
 
 export interface ConnectionSyncResult {
   connectionId: string;
@@ -639,6 +641,11 @@ function computeExpiringSoon(
   const cutoffMs = EXPIRY_WARNING_DAYS * DAY_MS;
   const out: Array<{ connectionId: string; providerName: string; daysLeft: number }> = [];
   for (const c of conns) {
+    // Field name anchor: schema declares `expiresAt: integer('expires_at',
+    // { mode: 'timestamp' }).notNull()` (see src/db/schema.ts), so the
+    // drizzle-inferred Connection type exposes camelCase `expiresAt: Date`.
+    // If the column is ever renamed this property access will fail at compile
+    // time — keep them in lockstep.
     const delta = c.expiresAt.getTime() - now.getTime();
     if (delta < cutoffMs) {
       out.push({
