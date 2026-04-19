@@ -114,6 +114,12 @@ export interface RecurringOptions {
  * Outflow-only: positive-amount rows (refunds, salary) are ignored — a
  * monthly salary credit is "recurring" but isn't useful for the
  * subscription-discovery use case Claude wires this up for.
+ *
+ * Implementation: the merchant grouping and distinct-month count are
+ * pushed down into SQL so we only pull rows for the small candidate set
+ * that already meets the month-count threshold (rather than every outflow
+ * in history). The per-merchant amount-similarity filter runs in JS over
+ * that narrow set.
  */
 export function detectRecurringPayments(
   opts: RecurringOptions = {},
@@ -121,56 +127,74 @@ export function detectRecurringPayments(
 ): RecurringPaymentRow[] {
   const minOccurrences = Math.max(2, Math.floor(opts.minOccurrences ?? 3));
 
-  // Pull every outflow with a non-null merchant. The dataset is bounded by
-  // the user's own transaction history so a full scan is acceptable; a
-  // multi-CTE SQL approach would be hostile to readability for limited
-  // gain.
-  const rows = db
+  // Step 1 (SQL): group every outflow by merchant and count the distinct
+  // calendar months it appears in. Only merchants that already clear the
+  // distinct-month threshold are candidates; everything else is filtered
+  // before any data crosses into JS.
+  const candidates = db
     .select({
       merchant: transactions.merchantName,
-      amount: transactions.amount,
-      timestamp: transactions.timestamp,
+      months: sql<number>`COUNT(DISTINCT strftime('%Y-%m', datetime(${transactions.timestamp}, 'unixepoch')))`,
     })
     .from(transactions)
     .where(and(isNotNull(transactions.merchantName), sql`${transactions.amount} < 0`))
+    .groupBy(transactions.merchantName)
+    .having(
+      sql`COUNT(DISTINCT strftime('%Y-%m', datetime(${transactions.timestamp}, 'unixepoch'))) >= ${minOccurrences}`,
+    )
     .all();
 
-  type Sample = { absAmount: number; monthKey: string };
-  const byMerchant = new Map<string, Sample[]>();
-  for (const r of rows) {
-    if (!r.merchant) continue;
-    const ts =
-      r.timestamp instanceof Date ? r.timestamp : new Date(r.timestamp as unknown as number);
-    if (Number.isNaN(ts.getTime())) continue;
-    const monthKey = `${ts.getUTCFullYear()}-${String(ts.getUTCMonth() + 1).padStart(2, '0')}`;
-    const existing = byMerchant.get(r.merchant);
-    const sample: Sample = { absAmount: Math.abs(r.amount), monthKey };
-    if (existing) existing.push(sample);
-    else byMerchant.set(r.merchant, [sample]);
-  }
+  if (candidates.length === 0) return [];
 
+  // Step 2 (JS): for each candidate merchant pull its outflow samples and
+  // run the median + ±10% filter. The candidate list is tiny relative to
+  // the full transactions table, so this stays cheap even on large DBs.
   const out: RecurringPaymentRow[] = [];
-  for (const [merchant, samples] of byMerchant) {
-    const distinctMonths = new Set(samples.map((s) => s.monthKey));
-    if (distinctMonths.size < minOccurrences) continue;
+  for (const cand of candidates) {
+    if (!cand.merchant) continue;
+    const samples = db
+      .select({
+        amount: transactions.amount,
+        timestamp: transactions.timestamp,
+      })
+      .from(transactions)
+      .where(
+        and(
+          sql`${transactions.merchantName} = ${cand.merchant}`,
+          sql`${transactions.amount} < 0`,
+        ),
+      )
+      .all();
+
+    type Sample = { absAmount: number; monthKey: string };
+    const flattened: Sample[] = [];
+    for (const s of samples) {
+      const ts =
+        s.timestamp instanceof Date ? s.timestamp : new Date(s.timestamp as unknown as number);
+      if (Number.isNaN(ts.getTime())) continue;
+      flattened.push({
+        absAmount: Math.abs(s.amount),
+        monthKey: `${ts.getUTCFullYear()}-${String(ts.getUTCMonth() + 1).padStart(2, '0')}`,
+      });
+    }
 
     // Median is robust to outliers (a one-off promo charge from the same
     // merchant won't drag the centre off).
-    const sorted = [...samples].map((s) => s.absAmount).sort((a, b) => a - b);
+    const sorted = flattened.map((s) => s.absAmount).sort((a, b) => a - b);
     const median = medianOf(sorted);
     if (median === 0) continue;
 
     // Filter the samples to those within ±10 % of the median, then re-check
     // the distinct-month count. This is what excludes the
     // "many small + one large" amazon-style merchant from being mis-detected.
-    const within = samples.filter(
+    const within = flattened.filter(
       (s) => Math.abs(s.absAmount - median) / median <= RECURRING_AMOUNT_TOLERANCE,
     );
     const monthsWithin = new Set(within.map((s) => s.monthKey));
     if (monthsWithin.size < minOccurrences) continue;
 
     out.push({
-      merchant,
+      merchant: cand.merchant,
       monthlyAmount: roundTo(median, 2),
       occurrences: monthsWithin.size,
     });
