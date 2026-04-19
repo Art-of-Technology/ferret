@@ -41,18 +41,21 @@ Alpha. Built for personal use. Breaking changes likely until V1.
 
 ## Install
 
-```bash
-bun install -g ferret-cli
-```
+> Demo coming soon.
 
-Or from source:
+Ferret is alpha software and not yet published to a registry. Install from source:
 
 ```bash
-git clone https://github.com/redoh/ferret
+git clone https://github.com/Art-of-Technology/ferret.git
 cd ferret
 bun install
 bun link
 ```
+
+`bun link` makes the `ferret` binary available on your `PATH` from the checkout.
+To run without linking, prefix any command with `bun run src/cli.ts` (e.g. `bun run src/cli.ts init`).
+
+A published `bun install -g ferret-cli` flow is planned once V1 stabilises.
 
 ## Quick Start
 
@@ -106,9 +109,10 @@ ferret budget                    View or set category budgets
 ferret import <file>             Import CSV from a bank statement
 ferret export                    Export transactions to CSV or JSON
 ferret config                    View or edit configuration
+ferret version                   Print Ferret version
 ```
 
-Run `ferret help <command>` for flags and options on any command.
+Run `ferret <command> --help` for flags and options on any command.
 
 ## Examples
 
@@ -165,7 +169,7 @@ ferret ls --since 1y --json | jq '.[] | select(.amount < -100)'
 - **Claude** answers questions via tool use, querying SQLite directly rather than receiving bulk data
 - **Keychain** holds tokens, never the database, never logs
 
-See [docs/PRD.md](docs/PRD.md) for the full architecture and data model.
+See [docs/prd.md](docs/prd.md) for the full architecture and data model.
 
 ## Configuration
 
@@ -197,11 +201,11 @@ bun install
 # Run in dev mode
 bun run src/cli.ts --help
 
-# Run tests
-bun test
-
 # Lint and format
 bun run check
+
+# Type check
+bun run typecheck
 
 # Generate migrations after schema changes
 bun run db:generate
@@ -223,7 +227,33 @@ src/
 └── types/              # Domain and API types
 ```
 
-Read the [PRD](docs/PRD.md) before making non-trivial changes.
+Read the [PRD](docs/prd.md) before making non-trivial changes.
+
+## Tests
+
+```bash
+# Unit + integration tests (bun's built-in runner, zero config)
+bun test
+
+# Performance benchmark — seeds 100k transactions into a temp DB and
+# asserts the targets in PRD section 11.1 (ls < 200ms, etc).
+bun run bench
+```
+
+The bench exits non-zero if any target is missed and runs in CI on every push so
+performance regressions block merge.
+
+## Contributing
+
+Issues and PRs welcome. Before opening a non-trivial PR:
+
+1. Read [docs/prd.md](docs/prd.md) — the PRD is the source of truth for scope and design.
+2. Run `bun run check && bun run typecheck && bun test && bun run bench` locally.
+3. Keep commits small and use conventional commit messages (`feat:`, `fix:`, `chore:`, etc).
+
+CI runs the same checks on every push and PR via GitHub Actions
+(see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)) on macOS and Linux
+with a pinned Bun version.
 
 ## Security
 
@@ -255,7 +285,7 @@ If you find a security issue, please open a private security advisory rather tha
 - [ ] Recurring subscription detection
 - [ ] MCP server for Claude Desktop integration
 
-See [docs/PRD.md](docs/PRD.md) section 10 for the full phase plan.
+See [docs/prd.md](docs/prd.md) section 10 for the full phase plan.
 
 ## License
 
