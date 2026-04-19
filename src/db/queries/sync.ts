@@ -10,7 +10,7 @@
 // transactions PK, which we set to the provider transaction id.
 
 import { randomUUID } from 'node:crypto';
-import { and, eq, sql } from 'drizzle-orm';
+import { desc, eq, sql } from 'drizzle-orm';
 import type { BunSQLiteDatabase } from 'drizzle-orm/bun-sqlite';
 import type { Account, Connection, NewSyncLogEntry, NewTransaction } from '../../types/domain';
 import { db as defaultDb } from '../client';
@@ -58,30 +58,18 @@ export interface UpsertAccountInput {
  * newly discovered accounts and for refreshing balances on a known account.
  *
  * Never overwrites `is_manual` — manual accounts are owned by the import
- * pipeline and the bank-side TrueLayer surface should never touch them.
+ * pipeline and the bank-side TrueLayer surface should never touch them. We
+ * achieve this by simply not listing `is_manual` in the conflict-update set;
+ * the existing value is preserved.
+ *
+ * Atomic via `INSERT ... ON CONFLICT(id) DO UPDATE`. Avoids the TOCTOU window
+ * a SELECT-then-INSERT-or-UPDATE pair would have if two writers raced on the
+ * same account id.
  */
 export function upsertAccount(input: UpsertAccountInput, db: Db = defaultDb): void {
-  const existing = db.select().from(accounts).where(eq(accounts.id, input.id)).all();
-  if (existing.length === 0) {
-    db.insert(accounts)
-      .values({
-        id: input.id,
-        connectionId: input.connectionId,
-        accountType: input.accountType,
-        displayName: input.displayName,
-        iban: input.iban ?? null,
-        sortCode: input.sortCode ?? null,
-        accountNumber: input.accountNumber ?? null,
-        currency: input.currency,
-        balanceAvailable: input.balanceAvailable ?? null,
-        balanceCurrent: input.balanceCurrent ?? null,
-        balanceUpdatedAt: input.balanceUpdatedAt ?? null,
-        isManual: false,
-      })
-      .run();
-    return;
-  }
-
+  // Build the UPDATE-clause incrementally so callers can omit optional fields
+  // (undefined ≠ explicit null) and have the existing value preserved on
+  // conflict instead of being clobbered with NULL.
   const updates: Partial<Account> = {
     displayName: input.displayName,
     accountType: input.accountType,
@@ -93,7 +81,24 @@ export function upsertAccount(input: UpsertAccountInput, db: Db = defaultDb): vo
   if (input.balanceAvailable !== undefined) updates.balanceAvailable = input.balanceAvailable;
   if (input.balanceCurrent !== undefined) updates.balanceCurrent = input.balanceCurrent;
   if (input.balanceUpdatedAt !== undefined) updates.balanceUpdatedAt = input.balanceUpdatedAt;
-  db.update(accounts).set(updates).where(eq(accounts.id, input.id)).run();
+
+  db.insert(accounts)
+    .values({
+      id: input.id,
+      connectionId: input.connectionId,
+      accountType: input.accountType,
+      displayName: input.displayName,
+      iban: input.iban ?? null,
+      sortCode: input.sortCode ?? null,
+      accountNumber: input.accountNumber ?? null,
+      currency: input.currency,
+      balanceAvailable: input.balanceAvailable ?? null,
+      balanceCurrent: input.balanceCurrent ?? null,
+      balanceUpdatedAt: input.balanceUpdatedAt ?? null,
+      isManual: false,
+    })
+    .onConflictDoUpdate({ target: accounts.id, set: updates })
+    .run();
 }
 
 /**
@@ -260,15 +265,22 @@ export function getAccount(accountId: string, db: Db = defaultDb): Account | nul
  *
  * Returns null when neither signal is available — caller then falls back to
  * the configured default history window.
+ *
+ * Implementation note: we deliberately select the column directly (via
+ * orderBy + limit 1) rather than `MAX(timestamp)` wrapped in raw SQL. Drizzle
+ * only applies the `mode: 'timestamp'` Date<->seconds codec when it sees the
+ * column reference; raw `sql<number>` aggregates bypass it and return the
+ * integer-second value, which is a footgun (off by 1000x if mishandled).
+ * Using the column reference keeps unit handling consistent with every other
+ * read in this file.
  */
 export function getLatestTransactionTimestamp(accountId: string, db: Db = defaultDb): Date | null {
   const rows = db
-    .select({ ts: sql<number | null>`MAX(${transactions.timestamp})` })
+    .select({ timestamp: transactions.timestamp })
     .from(transactions)
-    .where(and(eq(transactions.accountId, accountId)))
+    .where(eq(transactions.accountId, accountId))
+    .orderBy(desc(transactions.timestamp))
+    .limit(1)
     .all();
-  const seconds = rows[0]?.ts ?? null;
-  if (seconds == null) return null;
-  // Drizzle returns the integer epoch (mode: timestamp on int column).
-  return new Date(Number(seconds) * 1000);
+  return rows[0]?.timestamp ?? null;
 }
