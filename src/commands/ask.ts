@@ -13,11 +13,20 @@
 import { defineCommand } from 'citty';
 import consola from 'consola';
 import { loadConfig } from '../lib/config';
-import { ConfigError } from '../lib/errors';
+import { ValidationError } from '../lib/errors';
 import { formatJson } from '../lib/format';
 import { ANTHROPIC_API_KEY, resolveSecret } from '../lib/secrets';
 import { type AskEvent, runAsk } from '../services/ask';
 import { ClaudeClient } from '../services/claude';
+
+/**
+ * Per-line cap for `--verbose` tool-call previews on stderr. 240 chars
+ * keeps long `query_transactions` SQL legible without flooding the
+ * terminal; 237 leaves room for the trailing "..." marker we append when
+ * the payload exceeds the cap.
+ */
+const VERBOSE_PREVIEW_MAX = 240;
+const VERBOSE_PREVIEW_BODY = VERBOSE_PREVIEW_MAX - 3; // "..." suffix budget
 
 interface CollectedAsk {
   answer: string;
@@ -37,7 +46,9 @@ export default defineCommand({
   async run({ args }) {
     const question = String(args.question ?? '').trim();
     if (question.length === 0) {
-      throw new ConfigError('ask: question is required');
+      // Empty user input is a validation failure (PRD §7.2 exit code 6),
+      // not a config issue (exit 2).
+      throw new ValidationError('ask: question is required');
     }
     const wantJson = Boolean(args.json);
     const verbose = Boolean(args.verbose);
@@ -170,7 +181,7 @@ function handleEvent(event: AskEvent, ctx: HandleEventCtx): void {
 function safeStringify(v: unknown): string {
   try {
     const s = JSON.stringify(v);
-    if (s.length > 240) return `${s.slice(0, 237)}...`;
+    if (s.length > VERBOSE_PREVIEW_MAX) return `${s.slice(0, VERBOSE_PREVIEW_BODY)}...`;
     return s;
   } catch {
     return String(v);
