@@ -7,7 +7,7 @@ import { existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { migrate } from 'drizzle-orm/bun-sqlite/migrator';
-import { FERRET_HOME, getDb } from '../src/db/client';
+import { getDb, getFerretHome } from '../src/db/client';
 
 const SEED = 1337;
 function rand(seed: number): () => number {
@@ -45,7 +45,8 @@ function migrationsDir(): string {
 }
 
 function main(): void {
-  if (!existsSync(FERRET_HOME)) mkdirSync(FERRET_HOME, { recursive: true, mode: 0o700 });
+  const ferretHome = getFerretHome();
+  if (!existsSync(ferretHome)) mkdirSync(ferretHome, { recursive: true, mode: 0o700 });
   const { db, raw } = getDb();
   const dir = migrationsDir();
   if (existsSync(dir)) migrate(db, { migrationsFolder: dir });
