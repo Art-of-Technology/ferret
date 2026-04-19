@@ -78,7 +78,10 @@ function installScriptedClaude(responses: ClaudeMessageResponse[]): {
     }),
     ClaudeClient: class {
       defaultModel = 'claude-opus-4-7';
-      async messagesCreate(req: MessagesCreateRequest): Promise<ClaudeMessageResponse> {
+      async messagesCreate(
+        req: MessagesCreateRequest,
+        _opts: { signal?: AbortSignal } = {},
+      ): Promise<ClaudeMessageResponse> {
         calls.push({ ...req, messages: [...req.messages] });
         const next = responses[i] ?? {
           id: 'fallback',

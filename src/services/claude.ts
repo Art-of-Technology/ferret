@@ -164,8 +164,17 @@ export class ClaudeClient {
   /**
    * Low-level passthrough to POST /v1/messages. Phase 5 (`ferret ask`) uses
    * this directly with `tools` + `tool_choice` to drive the tool-use loop.
+   *
+   * `opts.signal` is forwarded to the underlying `fetch` so a long-running
+   * Claude streaming response can be cancelled mid-call (e.g. Ctrl-C in
+   * the CLI). `fetch` raises `DOMException("AbortError")` on abort which
+   * we re-throw verbatim — the caller (the ask loop) treats any throw
+   * from `messagesCreate` as terminal and gracefully exits.
    */
-  async messagesCreate(req: MessagesCreateRequest): Promise<ClaudeMessageResponse> {
+  async messagesCreate(
+    req: MessagesCreateRequest,
+    opts: { signal?: AbortSignal } = {},
+  ): Promise<ClaudeMessageResponse> {
     const body: MessagesCreateRequest & { model: string } = {
       ...req,
       model: req.model ?? this.model,
@@ -184,8 +193,14 @@ export class ClaudeClient {
             'anthropic-version': ANTHROPIC_VERSION,
           },
           body: JSON.stringify(body),
+          signal: opts.signal,
         });
       } catch (err) {
+        // Don't swallow an explicit user abort with retries — propagate
+        // immediately so the caller can exit cleanly.
+        if (opts.signal?.aborted || (err as Error)?.name === 'AbortError') {
+          throw err;
+        }
         // Network-level failure (DNS / TCP / TLS). Retry with backoff like 5xx.
         if (attempt >= this.maxRetries) {
           throw new NetworkError(

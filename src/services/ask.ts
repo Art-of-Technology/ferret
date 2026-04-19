@@ -133,8 +133,19 @@ export async function* runAsk(opts: RunAskOptions): AsyncIterable<AskEvent> {
 
     let resp: ClaudeMessageResponse;
     try {
-      resp = await opts.claudeClient.messagesCreate(req);
+      // Forward the abort signal so a long Claude streaming response can
+      // be cancelled mid-call (Ctrl-C). The pre-iteration `aborted` check
+      // above only catches aborts that arrive between iterations; this
+      // covers aborts that arrive while the network call is in flight.
+      resp = await opts.claudeClient.messagesCreate(req, { signal: opts.abortSignal });
     } catch (err) {
+      // An explicit user abort during the network call surfaces as a
+      // DOMException("AbortError"). Treat it the same as the cooperative
+      // pre-iteration cancel so the caller still sees a clean `done`.
+      if (opts.abortSignal?.aborted || (err as Error)?.name === 'AbortError') {
+        yield { type: 'done', stopReason: 'stop_sequence', iterations };
+        return;
+      }
       if (err instanceof FerretError) throw err;
       throw err;
     }
