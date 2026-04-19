@@ -10,6 +10,7 @@ const EXPECTED_COMMANDS = [
   'init',
   'link',
   'unlink',
+  'remove',
   'connections',
   'sync',
   'ls',
