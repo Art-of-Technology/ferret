@@ -1,6 +1,6 @@
 // HSBC CSV parser.
 //
-// TODO: validate against real export.
+// TODO(#27): validate against real export.
 //
 // Best-effort header (HSBC UK personal banking statement download):
 //   Date,Description,Amount,Balance
@@ -12,6 +12,9 @@
 
 import { ValidationError } from '../../lib/errors';
 import { type ParsedTransaction, parseCsv } from './index';
+import { parseFloatSafe, parseUkDate } from './uk-date';
+
+const PARSER_NAME = 'HSBC';
 
 export function parseHsbc(raw: string): ParsedTransaction[] {
   const rows = parseCsv(raw);
@@ -30,7 +33,7 @@ export function parseHsbc(raw: string): ParsedTransaction[] {
     }
   }
   if (headerIdx === -1) {
-    throw new ValidationError('HSBC parser: header row not found');
+    throw new ValidationError(`${PARSER_NAME} parser: header row not found`);
   }
 
   const idx = {
@@ -50,29 +53,11 @@ export function parseHsbc(raw: string): ParsedTransaction[] {
     if (!dateStr) continue;
 
     out.push({
-      date: parseUkDate(dateStr),
-      amount: parseFloatSafe(amountStr),
+      date: parseUkDate(dateStr, PARSER_NAME),
+      amount: parseFloatSafe(amountStr, PARSER_NAME, i + 1),
       description,
       currency: 'GBP',
     });
   }
   return out;
-}
-
-function parseUkDate(s: string): Date {
-  const m = /^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/.exec(s);
-  if (!m) throw new ValidationError(`HSBC parser: invalid date '${s}'`);
-  const day = Number.parseInt(m[1] as string, 10);
-  const month = Number.parseInt(m[2] as string, 10);
-  let year = Number.parseInt(m[3] as string, 10);
-  if (year < 100) year += 2000;
-  return new Date(Date.UTC(year, month - 1, day));
-}
-
-function parseFloatSafe(s: string): number {
-  if (!s) return 0;
-  const cleaned = s.replace(/[£,]/g, '').trim();
-  if (!cleaned) return 0;
-  const n = Number.parseFloat(cleaned);
-  return Number.isFinite(n) ? n : 0;
 }
