@@ -7,7 +7,6 @@ import { migrate } from 'drizzle-orm/bun-sqlite/migrator';
 import purgeCmd from '../../src/commands/purge';
 import { getDb, getDbPath, getFerretHome, resetDbCache } from '../../src/db/client';
 import { accounts, connections, rules, transactions } from '../../src/db/schema';
-import { ValidationError } from '../../src/lib/errors';
 import { setKeychainBackend } from '../../src/services/keychain';
 import { InMemoryKeychain } from '../helpers/in-memory-keychain';
 
@@ -113,9 +112,29 @@ describe('ferret purge', () => {
     }
   });
 
-  test('refuses without --confirm and throws ValidationError', async () => {
+  test('without --confirm prints dry-run summary and exits cleanly', async () => {
     seed();
-    await expect(runPurge({})).rejects.toBeInstanceOf(ValidationError);
+
+    // Capture stdout so we can assert the dry-run summary is printed.
+    const chunks: string[] = [];
+    const originalWrite = process.stdout.write.bind(process.stdout);
+    type Writer = typeof process.stdout.write;
+    const capture: Writer = ((chunk: string | Uint8Array): boolean => {
+      chunks.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf-8'));
+      return true;
+    }) as Writer;
+    process.stdout.write = capture;
+    try {
+      // Must NOT throw — a dry-run is a valid, successful invocation.
+      await runPurge({});
+    } finally {
+      process.stdout.write = originalWrite;
+    }
+
+    const out = chunks.join('');
+    expect(out).toContain('dry run');
+    expect(out).toContain('would remove');
+    expect(out).toContain('run with --confirm to execute');
 
     // Nothing should have been deleted.
     const { db } = getDb();
