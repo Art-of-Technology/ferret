@@ -108,5 +108,8 @@ function parseFloatSafe(s: string): number {
   const cleaned = s.replace(/[£$€,]/g, '').trim();
   if (!cleaned) return 0;
   const n = Number.parseFloat(cleaned);
-  return Number.isFinite(n) ? n : 0;
+  if (!Number.isFinite(n) || !/^[+-]?(?:\d+\.?\d*|\.\d+)$/.test(cleaned)) {
+    throw new ValidationError(`Revolut parser: invalid amount '${s}'`);
+  }
+  return n;
 }

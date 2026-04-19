@@ -9,6 +9,7 @@
 
 import { ValidationError } from '../../lib/errors';
 import { type ParsedTransaction, parseCsv } from './index';
+import { parseFloatSafe, parseUkDate } from './uk-date';
 
 export function parseNatwest(raw: string): ParsedTransaction[] {
   const rows = parseCsv(raw);
@@ -54,29 +55,11 @@ export function parseNatwest(raw: string): ParsedTransaction[] {
     if (!dateStr) continue;
 
     out.push({
-      date: parseUkDate(dateStr),
-      amount: parseFloatSafe(valueStr),
+      date: parseUkDate(dateStr, 'NatWest'),
+      amount: parseFloatSafe(valueStr, 'NatWest', i + 1),
       description,
       currency: 'GBP',
     });
   }
   return out;
-}
-
-function parseUkDate(s: string): Date {
-  const m = /^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/.exec(s);
-  if (!m) throw new ValidationError(`NatWest parser: invalid date '${s}'`);
-  const day = Number.parseInt(m[1] as string, 10);
-  const month = Number.parseInt(m[2] as string, 10);
-  let year = Number.parseInt(m[3] as string, 10);
-  if (year < 100) year += 2000;
-  return new Date(Date.UTC(year, month - 1, day));
-}
-
-function parseFloatSafe(s: string): number {
-  if (!s) return 0;
-  const cleaned = s.replace(/[£,]/g, '').trim();
-  if (!cleaned) return 0;
-  const n = Number.parseFloat(cleaned);
-  return Number.isFinite(n) ? n : 0;
 }

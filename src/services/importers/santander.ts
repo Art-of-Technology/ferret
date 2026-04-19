@@ -18,6 +18,7 @@
 
 import { ValidationError } from '../../lib/errors';
 import { type ParsedTransaction, parseCsv } from './index';
+import { parseFloatSafe, parseUkDate } from './uk-date';
 
 export function parseSantander(raw: string): ParsedTransaction[] {
   // Detect block format vs CSV format. Block format has lines like "Date:" and
@@ -58,13 +59,13 @@ function parseBlocks(raw: string): ParsedTransaction[] {
 
     switch (key) {
       case 'date':
-        date = parseUkDate(value);
+        date = parseUkDate(value, 'Santander');
         break;
       case 'description':
         description = value;
         break;
       case 'amount':
-        amount = parseFloatSafe(value);
+        amount = parseFloatSafe(value, 'Santander');
         break;
       default:
         // Ignore Balance, From, To, Account, etc.
@@ -108,29 +109,11 @@ function parseCsvForm(raw: string): ParsedTransaction[] {
     const dateStr = (row[idx.date] ?? '').trim();
     if (!dateStr) continue;
     out.push({
-      date: parseUkDate(dateStr),
-      amount: parseFloatSafe((row[idx.amount] ?? '').trim()),
+      date: parseUkDate(dateStr, 'Santander'),
+      amount: parseFloatSafe((row[idx.amount] ?? '').trim(), 'Santander', i + 1),
       description: (row[idx.description] ?? '').trim(),
       currency: 'GBP',
     });
   }
   return out;
-}
-
-function parseUkDate(s: string): Date {
-  const m = /^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/.exec(s);
-  if (!m) throw new ValidationError(`Santander parser: invalid date '${s}'`);
-  const day = Number.parseInt(m[1] as string, 10);
-  const month = Number.parseInt(m[2] as string, 10);
-  let year = Number.parseInt(m[3] as string, 10);
-  if (year < 100) year += 2000;
-  return new Date(Date.UTC(year, month - 1, day));
-}
-
-function parseFloatSafe(s: string): number {
-  if (!s) return 0;
-  const cleaned = s.replace(/[£,]/g, '').trim();
-  if (!cleaned) return 0;
-  const n = Number.parseFloat(cleaned);
-  return Number.isFinite(n) ? n : 0;
 }
