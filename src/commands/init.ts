@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defineCommand } from 'citty';
 import { migrate } from 'drizzle-orm/bun-sqlite/migrator';
-import { DB_PATH, FERRET_HOME, getDb } from '../db/client';
+import { getDb, getDbPath, getFerretHome } from '../db/client';
 import { categories } from '../db/schema';
 import { configPath, loadConfig, writeConfig } from '../lib/config';
 
@@ -53,16 +53,18 @@ function migrationsDir(): string {
 export default defineCommand({
   meta: { name: 'init', description: 'Initialize ~/.ferret, create DB, seed categories' },
   run() {
-    if (!existsSync(FERRET_HOME)) {
-      mkdirSync(FERRET_HOME, { recursive: true, mode: 0o700 });
-      process.stdout.write(`created ${FERRET_HOME}\n`);
+    const ferretHome = getFerretHome();
+    const dbPath = getDbPath();
+    if (!existsSync(ferretHome)) {
+      mkdirSync(ferretHome, { recursive: true, mode: 0o700 });
+      process.stdout.write(`created ${ferretHome}\n`);
     }
 
     const { db, raw } = getDb();
     const dir = migrationsDir();
     if (existsSync(dir)) {
       migrate(db, { migrationsFolder: dir });
-      process.stdout.write(`migrated ${DB_PATH}\n`);
+      process.stdout.write(`migrated ${dbPath}\n`);
     } else {
       process.stdout.write(`warning: no migrations folder at ${dir}\n`);
     }

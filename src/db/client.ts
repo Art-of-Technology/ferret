@@ -5,12 +5,18 @@ import { dirname, join } from 'node:path';
 import { type BunSQLiteDatabase, drizzle } from 'drizzle-orm/bun-sqlite';
 import * as schema from './schema';
 
-export const FERRET_HOME = join(process.env.HOME ?? homedir(), '.ferret');
-export const DB_PATH = join(FERRET_HOME, 'ferret.db');
+// Computed lazily so tests that override HOME via mktemp see the new value.
+// Module-level constants would freeze the path at first import.
+export function getFerretHome(): string {
+  return join(process.env.HOME ?? homedir(), '.ferret');
+}
+export function getDbPath(): string {
+  return join(getFerretHome(), 'ferret.db');
+}
 
 let cached: { db: BunSQLiteDatabase<typeof schema>; raw: Database } | null = null;
 
-export function getDb(dbPath: string = DB_PATH): {
+export function getDb(dbPath: string = getDbPath()): {
   db: BunSQLiteDatabase<typeof schema>;
   raw: Database;
 } {
