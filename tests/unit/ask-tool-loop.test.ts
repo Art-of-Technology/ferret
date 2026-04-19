@@ -1,0 +1,378 @@
+// Unit tests for the `ferret ask` tool-use loop. The Claude client is
+// fully mocked so no real API calls are issued; the tests script the
+// model's responses to drive the orchestrator through every code path:
+// single end_turn, single tool round-trip, max-iterations cap, and
+// AbortSignal cancellation.
+
+import { describe, expect, test } from 'bun:test';
+import {
+  type AskEvent,
+  DEFAULT_MAX_ITERATIONS,
+  buildToolDefs,
+  runAsk,
+} from '../../src/services/ask';
+import type { ClaudeMessageResponse, MessagesCreateRequest } from '../../src/services/claude';
+import type { ClaudeClient } from '../../src/services/claude';
+
+interface ScriptedClient {
+  client: ClaudeClient;
+  calls: MessagesCreateRequest[];
+}
+
+/**
+ * Minimal scripted ClaudeClient: returns the next response in the queue
+ * on each `messagesCreate` call. Anything beyond the queue length is
+ * `end_turn` with empty text so an over-long loop fails loudly.
+ */
+function scriptedClient(responses: ClaudeMessageResponse[]): ScriptedClient {
+  const calls: MessagesCreateRequest[] = [];
+  let i = 0;
+  const client = {
+    defaultModel: 'claude-opus-4-7',
+    async messagesCreate(req: MessagesCreateRequest): Promise<ClaudeMessageResponse> {
+      // Snapshot the messages array at call-time. The orchestrator owns
+      // a single `messages` array that it mutates between iterations, so
+      // a naive reference-store would let later mutations leak into the
+      // earlier `calls[i]` view. Tests assert against per-call history.
+      calls.push({ ...req, messages: [...req.messages] });
+      const next = responses[i] ?? {
+        id: 'fallback',
+        type: 'message',
+        role: 'assistant',
+        model: 'claude-opus-4-7',
+        content: [{ type: 'text', text: '(end)' }],
+        stop_reason: 'end_turn',
+        stop_sequence: null,
+      };
+      i += 1;
+      return next;
+    },
+  } as unknown as ClaudeClient;
+  return { client, calls };
+}
+
+async function collect(stream: AsyncIterable<AskEvent>): Promise<AskEvent[]> {
+  const out: AskEvent[] = [];
+  for await (const ev of stream) out.push(ev);
+  return out;
+}
+
+describe('runAsk — happy path', () => {
+  test('single end_turn streams text and emits done', async () => {
+    const { client, calls } = scriptedClient([
+      {
+        id: 'm1',
+        type: 'message',
+        role: 'assistant',
+        model: 'claude-opus-4-7',
+        content: [{ type: 'text', text: 'hello world' }],
+        stop_reason: 'end_turn',
+        stop_sequence: null,
+      },
+    ]);
+    const events = await collect(
+      runAsk({
+        question: 'hi',
+        claudeClient: client,
+      }),
+    );
+    expect(calls).toHaveLength(1);
+    const tokens = events.filter((e) => e.type === 'token');
+    expect(tokens).toEqual([{ type: 'token', text: 'hello world' }]);
+    const done = events.find((e) => e.type === 'done');
+    expect(done?.type).toBe('done');
+    if (done?.type === 'done') {
+      expect(done.iterations).toBe(1);
+      expect(done.stopReason).toBe('end_turn');
+    }
+  });
+
+  test('passes the system prompt and tool definitions on every call', async () => {
+    const { client, calls } = scriptedClient([
+      {
+        id: 'm1',
+        type: 'message',
+        role: 'assistant',
+        model: 'claude-opus-4-7',
+        content: [{ type: 'text', text: 'answer' }],
+        stop_reason: 'end_turn',
+        stop_sequence: null,
+      },
+    ]);
+    await collect(runAsk({ question: 'q', claudeClient: client, maxTokens: 1024 }));
+    expect(calls[0]?.system).toContain('Ferret');
+    expect(calls[0]?.tools?.map((t) => t.name).sort()).toEqual([
+      'get_account_list',
+      'get_category_summary',
+      'get_recurring_payments',
+      'query_transactions',
+    ]);
+    expect(calls[0]?.max_tokens).toBe(1024);
+  });
+});
+
+describe('runAsk — tool round trip', () => {
+  test('dispatches tool, feeds result back, then ends', async () => {
+    const { client, calls } = scriptedClient([
+      // First response: tool_use for get_account_list.
+      {
+        id: 'm1',
+        type: 'message',
+        role: 'assistant',
+        model: 'claude-opus-4-7',
+        content: [
+          { type: 'text', text: 'looking up accounts...' },
+          { type: 'tool_use', id: 'tu1', name: 'get_account_list', input: {} },
+        ],
+        stop_reason: 'tool_use',
+        stop_sequence: null,
+      },
+      // Second response: end_turn after seeing the tool result.
+      {
+        id: 'm2',
+        type: 'message',
+        role: 'assistant',
+        model: 'claude-opus-4-7',
+        content: [{ type: 'text', text: 'You have 2 accounts.' }],
+        stop_reason: 'end_turn',
+        stop_sequence: null,
+      },
+    ]);
+
+    const events = await collect(
+      runAsk({
+        question: 'list my accounts',
+        claudeClient: client,
+        tools: {
+          get_account_list: () => [
+            // Skip Account fields not exercised by the orchestrator beyond
+            // arity; cast through unknown is intentional for test brevity.
+            { id: 'a1', displayName: 'Current' } as never,
+            { id: 'a2', displayName: 'Savings' } as never,
+          ],
+        },
+      }),
+    );
+
+    // Expect: token, tool_call, tool_result, token, done — in order.
+    const types = events.map((e) => e.type);
+    expect(types).toEqual(['token', 'tool_call', 'tool_result', 'token', 'done']);
+
+    const call = events.find((e) => e.type === 'tool_call');
+    expect(call?.type === 'tool_call' && call.name).toBe('get_account_list');
+    const result = events.find((e) => e.type === 'tool_result');
+    expect(result?.type === 'tool_result' && result.ok).toBe(true);
+    expect(result?.type === 'tool_result' && result.summary).toContain('2 accounts');
+
+    // The second model call should include the assistant tool_use and the
+    // user tool_result block in the message history.
+    expect(calls).toHaveLength(2);
+    const secondMsgs = calls[1]?.messages ?? [];
+    const lastUser = secondMsgs[secondMsgs.length - 1];
+    expect(lastUser?.role).toBe('user');
+    if (Array.isArray(lastUser?.content)) {
+      const tr = lastUser?.content.find((b) => 'type' in b && b.type === 'tool_result');
+      expect(tr).toBeDefined();
+    } else {
+      throw new Error('tool_result feedback must be an array of content blocks');
+    }
+  });
+
+  test('dispatches multiple tool_use blocks from one assistant turn', async () => {
+    const { client, calls } = scriptedClient([
+      {
+        id: 'm1',
+        type: 'message',
+        role: 'assistant',
+        model: 'claude-opus-4-7',
+        content: [
+          { type: 'tool_use', id: 'tu1', name: 'get_account_list', input: {} },
+          {
+            type: 'tool_use',
+            id: 'tu2',
+            name: 'get_recurring_payments',
+            input: { min_occurrences: 3 },
+          },
+        ],
+        stop_reason: 'tool_use',
+        stop_sequence: null,
+      },
+      {
+        id: 'm2',
+        type: 'message',
+        role: 'assistant',
+        model: 'claude-opus-4-7',
+        content: [{ type: 'text', text: 'done' }],
+        stop_reason: 'end_turn',
+        stop_sequence: null,
+      },
+    ]);
+
+    let listed = 0;
+    let recurringCalled = 0;
+    const events = await collect(
+      runAsk({
+        question: 'analyze',
+        claudeClient: client,
+        tools: {
+          get_account_list: () => {
+            listed += 1;
+            return [];
+          },
+          get_recurring_payments: () => {
+            recurringCalled += 1;
+            return [];
+          },
+        },
+      }),
+    );
+
+    expect(listed).toBe(1);
+    expect(recurringCalled).toBe(1);
+    const callsByName = events
+      .filter((e) => e.type === 'tool_call')
+      .map((e) => (e.type === 'tool_call' ? e.name : ''));
+    expect(callsByName).toEqual(['get_account_list', 'get_recurring_payments']);
+
+    // Both tool_results must be in a single user message in the history.
+    const secondMsgs = calls[1]?.messages ?? [];
+    const lastUser = secondMsgs[secondMsgs.length - 1];
+    if (!Array.isArray(lastUser?.content)) {
+      throw new Error('expected array content');
+    }
+    const trs = lastUser.content.filter((b) => 'type' in b && b.type === 'tool_result');
+    expect(trs).toHaveLength(2);
+  });
+});
+
+describe('runAsk — safety caps', () => {
+  test('caps iterations when Claude never returns end_turn', async () => {
+    // Build a stream of tool_use responses longer than the cap.
+    const looping: ClaudeMessageResponse[] = Array.from({ length: 20 }, (_, i) => ({
+      id: `m${i}`,
+      type: 'message',
+      role: 'assistant',
+      model: 'claude-opus-4-7',
+      content: [{ type: 'tool_use', id: `tu${i}`, name: 'get_account_list', input: {} }],
+      stop_reason: 'tool_use',
+      stop_sequence: null,
+    }));
+    const { client, calls } = scriptedClient(looping);
+    const events = await collect(
+      runAsk({
+        question: 'loop forever',
+        claudeClient: client,
+        tools: { get_account_list: () => [] },
+      }),
+    );
+    expect(calls.length).toBe(DEFAULT_MAX_ITERATIONS);
+    const done = events.find((e) => e.type === 'done');
+    expect(done?.type === 'done' && done.iterations).toBe(DEFAULT_MAX_ITERATIONS);
+  });
+
+  test('honours AbortSignal between iterations', async () => {
+    const ac = new AbortController();
+    const { client, calls } = scriptedClient([
+      // First response: tool_use. The orchestrator dispatches the tool,
+      // then we abort BEFORE it would re-enter the loop.
+      {
+        id: 'm1',
+        type: 'message',
+        role: 'assistant',
+        model: 'claude-opus-4-7',
+        content: [{ type: 'tool_use', id: 'tu1', name: 'get_account_list', input: {} }],
+        stop_reason: 'tool_use',
+        stop_sequence: null,
+      },
+      // Second response should never be requested.
+      {
+        id: 'm2',
+        type: 'message',
+        role: 'assistant',
+        model: 'claude-opus-4-7',
+        content: [{ type: 'text', text: 'too late' }],
+        stop_reason: 'end_turn',
+        stop_sequence: null,
+      },
+    ]);
+    const events = await collect(
+      runAsk({
+        question: 'q',
+        claudeClient: client,
+        abortSignal: ac.signal,
+        tools: {
+          get_account_list: () => {
+            // Abort during the tool call so the post-iteration check trips.
+            ac.abort();
+            return [];
+          },
+        },
+      }),
+    );
+    expect(calls.length).toBe(1);
+    const done = events.find((e) => e.type === 'done');
+    expect(done?.type).toBe('done');
+  });
+});
+
+describe('runAsk — tool error handling', () => {
+  test('tool exception becomes a tool_result with ok:false (not a hard throw)', async () => {
+    const { client } = scriptedClient([
+      {
+        id: 'm1',
+        type: 'message',
+        role: 'assistant',
+        model: 'claude-opus-4-7',
+        content: [
+          {
+            type: 'tool_use',
+            id: 'tu1',
+            name: 'query_transactions',
+            input: { sql: 'DROP TABLE x' },
+          },
+        ],
+        stop_reason: 'tool_use',
+        stop_sequence: null,
+      },
+      {
+        id: 'm2',
+        type: 'message',
+        role: 'assistant',
+        model: 'claude-opus-4-7',
+        content: [{ type: 'text', text: 'understood' }],
+        stop_reason: 'end_turn',
+        stop_sequence: null,
+      },
+    ]);
+    const events = await collect(
+      runAsk({
+        question: 'try evil',
+        claudeClient: client,
+        tools: {
+          query_transactions: () => {
+            throw new Error('SQL contains forbidden token: DROP');
+          },
+        },
+      }),
+    );
+    const result = events.find((e) => e.type === 'tool_result');
+    expect(result?.type === 'tool_result' && result.ok).toBe(false);
+    expect(result?.type === 'tool_result' && result.summary).toContain('DROP');
+  });
+});
+
+describe('buildToolDefs', () => {
+  test('exposes the four PRD §8.2 tools with the expected schemas', () => {
+    const defs = buildToolDefs();
+    expect(defs.map((d) => d.name).sort()).toEqual([
+      'get_account_list',
+      'get_category_summary',
+      'get_recurring_payments',
+      'query_transactions',
+    ]);
+    const sumDef = defs.find((d) => d.name === 'get_category_summary');
+    expect(sumDef?.input_schema.required).toEqual(['from', 'to']);
+    const queryDef = defs.find((d) => d.name === 'query_transactions');
+    expect(queryDef?.input_schema.required).toEqual(['sql']);
+  });
+});
