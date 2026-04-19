@@ -181,8 +181,8 @@ export default defineCommand({
       configState = 'removed';
     }
 
-    process.stdout.write(
-      `${rowsRemoved} rows removed across ${tablesTouched} tables, ${keychainCleared} keychain entries cleared, DB file ${dbExists ? 'removed' : 'absent'}, config ${configState}\n`,
+    consola.success(
+      `${rowsRemoved} rows removed across ${tablesTouched} tables, ${keychainCleared} keychain entries cleared, DB file ${dbExists ? 'removed' : 'absent'}, config ${configState}`,
     );
   },
 });
