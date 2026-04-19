@@ -151,70 +151,64 @@ export async function runOAuthFlow(
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const opener = opts.openBrowser ?? defaultOpenBrowser;
 
+  // Build dedup wrappers up front so we can hand them to the server bind.
+  let settled = false;
+  let resolveResult!: (r: OAuthCallbackResult) => void;
+  let rejectResult!: (e: Error) => void;
+  const result = new Promise<OAuthCallbackResult>((resolve, reject) => {
+    resolveResult = (r) => {
+      if (settled) return;
+      settled = true;
+      resolve(r);
+    };
+    rejectResult = (e) => {
+      if (settled) return;
+      settled = true;
+      reject(e);
+    };
+  });
+
+  // Bind the real callback server directly, retrying with a fresh port on
+  // collision. We deliberately avoid a probe-then-bind two-step (which has a
+  // TOCTOU race: another process can grab the port between probe.stop() and
+  // the real bind).
   let server: ServerHandle | null = null;
-  let port = 0;
-  let bound = false;
   let lastErr: unknown = null;
   for (let attempt = 0; attempt < MAX_PORT_RETRIES; attempt++) {
     const candidate = pickPort();
     try {
-      // Probe for binding success: a port collision throws synchronously here.
-      const probe = Bun.serve({
-        port: candidate,
-        hostname: '127.0.0.1',
-        fetch: () => new Response('ok'),
-      });
-      probe.stop(true);
-      port = candidate;
-      bound = true;
+      server = startCallbackServer(candidate, state, resolveResult, rejectResult);
       break;
     } catch (err) {
+      // Bun surfaces port collisions as a synchronous throw; retry with a new
+      // random port. Other errors (e.g. permission denied) will eventually
+      // surface via lastErr if all attempts exhaust.
       lastErr = err;
     }
   }
-  if (!bound) {
+  if (!server) {
     throw new NetworkError(
       `Could not bind a localhost port in ${PORT_MIN}-${PORT_MAX} after ${MAX_PORT_RETRIES} attempts: ${(lastErr as Error)?.message ?? 'unknown'}`,
     );
   }
-
+  const port = server.port;
   const redirectUri = `http://localhost:${port}/callback`;
   const authUrl = opts.buildAuthUrl(redirectUri, state);
 
-  const result = await new Promise<OAuthCallbackResult>((resolve, reject) => {
-    let settled = false;
-    const wrap =
-      <T>(fn: (v: T) => void) =>
-      (v: T) => {
-        if (settled) return;
-        settled = true;
-        fn(v);
-      };
-    const wResolve = wrap(resolve);
-    const wReject = wrap(reject);
-
-    try {
-      server = startCallbackServer(port, state, wResolve, wReject);
-    } catch (err) {
-      wReject(
-        new NetworkError(`Failed to start callback server on :${port} — ${(err as Error).message}`),
-      );
-      return;
-    }
-
+  try {
     opts.onListening?.({ port, redirectUri, authUrl });
     opener(authUrl);
 
     const timer = setTimeout(() => {
-      wReject(new AuthError(`OAuth flow timed out after ${Math.round(timeoutMs / 1000)}s.`));
+      rejectResult(new AuthError(`OAuth flow timed out after ${Math.round(timeoutMs / 1000)}s.`));
     }, timeoutMs);
-    // Don't keep the event loop alive past resolution.
     if (typeof timer === 'object' && timer && 'unref' in timer) {
       (timer as { unref: () => void }).unref();
     }
-  }).finally(() => {
-    server?.stop(true);
-  });
 
-  return { ...result, redirectUri, port };
+    const captured = await result;
+    return { ...captured, redirectUri, port };
+  } finally {
+    server.stop(true);
+  }
 }
