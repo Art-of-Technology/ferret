@@ -62,8 +62,13 @@ export default defineCommand({
         if (!VALID_FIELDS.has(field)) {
           throw new ValidationError(`--field must be 'merchant' or 'description', got "${field}".`);
         }
-        // Compile-test the regex with the same flag the apply-time path uses
-        // so users see "bad regex" up front rather than at the next `tag`.
+        // Validate-only compile: we do NOT cache the compiled RegExp.
+        // The pattern lives in SQLite as a string and gets compiled at
+        // apply time (`services/categorize.ts > applyRules`); caching
+        // across processes would be pointless and caching in this same
+        // process is wasted work since `rules add` exits immediately.
+        // We just want the user to see "bad regex" up front rather than
+        // at the next `tag`.
         try {
           new RegExp(pattern, 'i');
         } catch (err) {

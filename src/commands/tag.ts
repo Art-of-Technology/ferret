@@ -33,6 +33,15 @@ import {
 } from '../services/categorize';
 import { ClaudeClient } from '../services/claude';
 
+/**
+ * Cap on rows printed in the assignment table after a `tag` run.
+ * Picked to keep the terminal output scrollable on a typical screen
+ * (a 200-row table is ~3 screenfuls in a vt100). The summary count
+ * line above the table always reflects the full result, and the
+ * underlying writes are NOT capped — only the display is.
+ */
+const MAX_DISPLAY_ROWS = 200;
+
 export default defineCommand({
   meta: { name: 'tag', description: 'Categorize transactions (rules + cache + Claude)' },
   args: {
@@ -63,16 +72,28 @@ export default defineCommand({
     const retag = Boolean(args.retag);
 
     // Manual override path. citty surfaces missing positionals as undefined.
+    // Manual override REQUIRES both <txn_id> and <category>; if the user
+    // supplied just one positional we want a hard error (not a silent
+    // fallthrough to batch mode). Order matters here: validate the
+    // partial-override case before dispatching the full one.
     const txnId = typeof args.txnId === 'string' ? args.txnId : undefined;
     const category = typeof args.category === 'string' ? args.category : undefined;
-    if (txnId && category) {
-      await runManualOverride(txnId, category, dryRun);
-      return;
-    }
     if (txnId && !category) {
       throw new ValidationError(
         'Manual override requires both <txn_id> and <category>; missing <category>.',
       );
+    }
+    if (!txnId && category) {
+      // Defensive: citty positional ordering means this shouldn't really
+      // happen, but if a future args refactor breaks ordering we'd rather
+      // surface the bad input than silently drop the category.
+      throw new ValidationError(
+        'Manual override requires both <txn_id> and <category>; missing <txn_id>.',
+      );
+    }
+    if (txnId && category) {
+      await runManualOverride(txnId, category, dryRun);
+      return;
     }
 
     if (retag) {
@@ -180,7 +201,7 @@ function renderCounts(c: SourceCounts): string {
 
 function renderAssignmentTable(rows: PipelineAssignment[]): string {
   if (rows.length === 0) return 'no assignments';
-  const display = rows.slice(0, 200).map((r) => ({
+  const display = rows.slice(0, MAX_DISPLAY_ROWS).map((r) => ({
     txn: r.transactionId,
     category: r.category,
     source: r.source,
