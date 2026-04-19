@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import {
-  type KeychainBackend,
-  SERVICE,
   accountNames,
   deleteAllForConnection,
   deleteToken,
   getToken,
+  type KeychainBackend,
+  SERVICE,
   setKeychainBackend,
   setToken,
 } from '../../src/services/keychain';

@@ -2,8 +2,8 @@ import { defineCommand } from 'citty';
 import {
   type ListFilters,
   type ListSortField,
-  type TransactionRow,
   listTransactions,
+  type TransactionRow,
 } from '../db/queries/list';
 import { formatDate, parseDate, parseDuration } from '../lib/dates';
 import { ValidationError } from '../lib/errors';

@@ -11,8 +11,8 @@
 import { asc, desc, eq, inArray, isNull, or, sql } from 'drizzle-orm';
 import type { BunSQLiteDatabase } from 'drizzle-orm/bun-sqlite';
 import { db as defaultDb } from '../client';
-import { categories, merchantCache, rules, transactions } from '../schema';
 import type * as schema from '../schema';
+import { categories, merchantCache, rules, transactions } from '../schema';
 
 export interface UncategorizedTxn {
   id: string;

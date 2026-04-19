@@ -7,14 +7,17 @@
 import { describe, expect, test } from 'bun:test';
 import {
   type AskEvent,
-  DEFAULT_MAX_ITERATIONS,
-  TOOL_RESULT_MAX_CHARS,
   buildToolDefs,
+  DEFAULT_MAX_ITERATIONS,
   runAsk,
+  TOOL_RESULT_MAX_CHARS,
   truncateToolContent,
 } from '../../src/services/ask';
-import type { ClaudeMessageResponse, MessagesCreateRequest } from '../../src/services/claude';
-import type { ClaudeClient } from '../../src/services/claude';
+import type {
+  ClaudeClient,
+  ClaudeMessageResponse,
+  MessagesCreateRequest,
+} from '../../src/services/claude';
 
 interface ScriptedClient {
   client: ClaudeClient;

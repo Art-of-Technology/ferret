@@ -156,7 +156,7 @@ export function setBudget(category: string, monthlyAmount: number, currency: str
   if (!Number.isFinite(monthlyAmount) || monthlyAmount <= 0) {
     throw new ValidationError(`Budget amount must be a positive number, got: ${monthlyAmount}`);
   }
-  if (!category || !category.trim()) {
+  if (!category?.trim()) {
     throw new ValidationError('Category name is required');
   }
 
