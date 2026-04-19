@@ -11,6 +11,7 @@ import {
   exportBudgets,
   getCurrentMonthBudgets,
   getHistoricalBudgets,
+  monthLabel,
   removeBudget,
   setBudget,
 } from '../db/queries/budgets';
@@ -33,15 +34,37 @@ function fmtMoney(amount: number, currency: string): string {
   return `${symbolFor(currency)}${Math.round(amount).toLocaleString('en-GB')}`;
 }
 
+// Width measured in Unicode code points rather than UTF-16 code units so
+// surrogate-pair glyphs (e.g. emoji currency markers) don't throw the column
+// alignment off. This is still not grapheme-cluster correct, but matches
+// what a fixed-width terminal sees for the symbols we currently support
+// (£/$/€ are all single code points).
+function visualLength(s: string): number {
+  let n = 0;
+  for (const _ of s) n++;
+  return n;
+}
+
 function pad(s: string, n: number): string {
-  return s.length >= n ? s : s + ' '.repeat(n - s.length);
+  const len = visualLength(s);
+  return len >= n ? s : s + ' '.repeat(n - len);
 }
 
 function parseAmount(raw: unknown): number {
-  if (typeof raw === 'number' && Number.isFinite(raw)) return raw;
-  const n = Number.parseFloat(String(raw));
-  if (!Number.isFinite(n)) {
-    throw new ValidationError(`Amount must be a number, got: ${String(raw)}`);
+  let n: number;
+  if (typeof raw === 'number' && Number.isFinite(raw)) {
+    n = raw;
+  } else {
+    n = Number.parseFloat(String(raw));
+    if (!Number.isFinite(n)) {
+      throw new ValidationError(`Amount must be a number, got: ${String(raw)}`);
+    }
+  }
+  // Reject zero / negative early: budgets are always positive monthly limits.
+  // The downstream setBudget check would also catch this, but the message
+  // is more useful here at the input boundary.
+  if (n <= 0) {
+    throw new ValidationError(`Amount must be greater than 0, got: ${n}`);
   }
   return n;
 }
@@ -58,23 +81,8 @@ function renderCurrentMonthHeader(view: BudgetWithProgress[], now: Date): string
     totalDays = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 0)).getUTCDate();
     daysElapsed = Math.max(1, Math.min(totalDays, now.getUTCDate()));
   }
-  const monthNames = [
-    'January',
-    'February',
-    'March',
-    'April',
-    'May',
-    'June',
-    'July',
-    'August',
-    'September',
-    'October',
-    'November',
-    'December',
-  ];
-  const label = `${monthNames[now.getUTCMonth()] ?? ''} ${now.getUTCFullYear()}`;
   const elapsedPct = Math.round((daysElapsed / totalDays) * 100);
-  return `${label} (day ${daysElapsed}/${totalDays}, ${elapsedPct}% elapsed)`;
+  return `${monthLabel(now)} (day ${daysElapsed}/${totalDays}, ${elapsedPct}% elapsed)`;
 }
 
 function renderBudgetRow(b: BudgetWithProgress): string {
@@ -180,7 +188,12 @@ export default defineCommand({
       meta: { name: 'export', description: 'Export budgets as JSON' },
       run() {
         const rows = exportBudgets();
-        process.stdout.write(`${JSON.stringify(rows, null, 2)}\n`);
+        // Always emit valid JSON, even when zero budgets are set. An empty
+        // array serialises to "[]" which is what import-side consumers
+        // expect (and is what JSON.stringify already produces for []), so
+        // the explicit branch is just for clarity / future maintainers.
+        const payload = rows.length === 0 ? '[]' : JSON.stringify(rows, null, 2);
+        process.stdout.write(`${payload}\n`);
       },
     }),
   },
