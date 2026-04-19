@@ -3,12 +3,12 @@
 // txn_category_idx, txn_merchant_idx) so we hit the perf target of < 200ms on
 // 100k rows (PRD §11.1). We never SELECT * and filter in JS.
 
-import { type SQL, and, asc, desc, eq, gt, gte, lt, lte, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, gte, lt, lte, or, type SQL, sql } from 'drizzle-orm';
 import type { BunSQLiteDatabase } from 'drizzle-orm/bun-sqlite';
 import { ValidationError } from '../../lib/errors';
 import { db as defaultDb } from '../client';
-import { accounts, transactions } from '../schema';
 import type * as schema from '../schema';
+import { accounts, transactions } from '../schema';
 
 export type ListSortField = 'timestamp' | 'amount' | 'merchant' | 'category';
 export type ListSortDir = 'asc' | 'desc';

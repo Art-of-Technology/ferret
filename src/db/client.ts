@@ -53,7 +53,7 @@ export function resetDbCache(): void {
 export const db: BunSQLiteDatabase<typeof schema> = new Proxy(
   {} as BunSQLiteDatabase<typeof schema>,
   {
-    get(_target, prop, receiver) {
+    get(_target, prop, _receiver) {
       const real = getDb().db as unknown as Record<string | symbol, unknown>;
       const value = real[prop as string | symbol];
       if (typeof value === 'function') {

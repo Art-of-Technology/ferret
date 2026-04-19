@@ -25,10 +25,10 @@ import { ConfigError, ValidationError } from '../lib/errors';
 import { formatTable } from '../lib/format';
 import { ANTHROPIC_API_KEY, tryResolveSecret } from '../lib/secrets';
 import {
-  type PipelineAssignment,
-  type SourceCounts,
   categorizeBatch,
   normalizeMerchant,
+  type PipelineAssignment,
+  type SourceCounts,
   toTxnUpdates,
 } from '../services/categorize';
 import { ClaudeClient } from '../services/claude';

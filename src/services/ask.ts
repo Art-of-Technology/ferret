@@ -21,11 +21,11 @@ import { sql } from 'drizzle-orm';
 import { getDb } from '../db/client';
 import {
   type CategorySummaryRow,
-  type RecurringPaymentRow,
-  type RunReadOnlyQueryResult,
   detectRecurringPayments,
   getAccountList,
   getCategorySummary,
+  type RecurringPaymentRow,
+  type RunReadOnlyQueryResult,
   runReadOnlyQueryWithMeta,
 } from '../db/queries/analytics';
 import { defaultCurrency } from '../db/queries/budgets';
@@ -34,13 +34,13 @@ import { loadConfig } from '../lib/config';
 import { FerretError, ValidationError } from '../lib/errors';
 import type { Account } from '../types/domain';
 import type {
+  ClaudeClient,
   ClaudeContentBlock,
   ClaudeMessage,
   ClaudeMessageResponse,
   ClaudeTool,
   MessagesCreateRequest,
 } from './claude';
-import type { ClaudeClient } from './claude';
 
 /** Hard floor on iteration cap; below this the loop is too short to be useful. */
 const MIN_ITERATIONS = 1;

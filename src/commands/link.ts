@@ -14,7 +14,7 @@ import { getDb } from '../db/client';
 import { accounts, connections } from '../db/schema';
 import { appendAuditEvent } from '../lib/audit';
 import { AuthError, DataIntegrityError, ValidationError } from '../lib/errors';
-import { TRUELAYER_CLIENT_ID, TRUELAYER_CLIENT_SECRET, resolveSecret } from '../lib/secrets';
+import { resolveSecret, TRUELAYER_CLIENT_ID, TRUELAYER_CLIENT_SECRET } from '../lib/secrets';
 import { accountNames, setToken } from '../services/keychain';
 import { runOAuthFlow } from '../services/oauth';
 import {

@@ -10,11 +10,11 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  REDACTED,
-  ROTATE_BYTES,
   appendAuditEvent,
   getAuditLogPath,
   getAuditLogRotatedPath,
+  REDACTED,
+  ROTATE_BYTES,
   redactSecrets,
   rotateIfNeeded,
   tailAuditLog,

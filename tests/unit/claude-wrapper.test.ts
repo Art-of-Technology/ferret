@@ -1,10 +1,10 @@
 import { describe, expect, test } from 'bun:test';
 import {
+  buildCategorizeTool,
   CATEGORIZE_TOOL_NAME,
   ClaudeClient,
   type ClaudeMessageResponse,
   type FetchLike,
-  buildCategorizeTool,
   parseCategorizeResponse,
   withTools,
 } from '../../src/services/claude';
