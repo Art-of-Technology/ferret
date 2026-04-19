@@ -15,6 +15,7 @@ import {
   removeBudget,
   setBudget,
 } from '../db/queries/budgets';
+import { appendAuditEvent } from '../lib/audit';
 import { ValidationError } from '../lib/errors';
 import { renderProgressBar } from '../lib/progress-bar';
 
@@ -151,6 +152,9 @@ export default defineCommand({
         const amount = parseAmount(args.amount);
         const currency = defaultCurrency();
         const saved = setBudget(category, amount, currency);
+        // Per issue #48, budget events log the category only. The amount
+        // is deliberately omitted — it is PII-adjacent spending detail.
+        appendAuditEvent('budget.set', { category: saved.category });
         process.stdout.write(
           `set budget: ${saved.category} ${fmtMoney(saved.monthlyAmount, saved.currency)} / month\n`,
         );
@@ -167,6 +171,7 @@ export default defineCommand({
         if (!removed) {
           throw new ValidationError(`No budget set for category: ${category}`);
         }
+        appendAuditEvent('budget.removed', { category });
         process.stdout.write(`removed budget: ${category}\n`);
       },
     }),

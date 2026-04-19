@@ -13,6 +13,7 @@ import consola from 'consola';
 import { eq, inArray, sql } from 'drizzle-orm';
 import { getDb } from '../db/client';
 import { accounts, connections, syncLog, transactions } from '../db/schema';
+import { appendAuditEvent } from '../lib/audit';
 import { ValidationError } from '../lib/errors';
 import { deleteAllForConnection } from '../services/keychain';
 
@@ -40,6 +41,12 @@ export default defineCommand({
     });
 
     db.update(connections).set({ status: 'revoked' }).where(eq(connections.id, connectionId)).run();
+
+    appendAuditEvent('connection.unlinked', {
+      connection_id: connectionId,
+      provider_id: conn.providerId,
+      keychain_entries_removed: removed,
+    });
 
     consola.success(
       `Unlinked ${conn.providerName} (${connectionId}). Removed ${removed} keychain entr${removed === 1 ? 'y' : 'ies'}; transaction history retained.`,
