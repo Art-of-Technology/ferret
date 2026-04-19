@@ -14,6 +14,7 @@ import { defineCommand } from 'citty';
 import consola from 'consola';
 import picocolors from 'picocolors';
 import { setBudget } from '../db/queries/budgets';
+import { appendAuditEvent } from '../lib/audit';
 import { loadConfig } from '../lib/config';
 import { FerretError, ValidationError } from '../lib/errors';
 import { formatJson } from '../lib/format';
@@ -116,6 +117,15 @@ export default defineCommand({
           },
         });
       }
+
+      // Audit: one event per ask invocation. Per issue #48 the question
+      // text, answer text, and tool inputs/outputs are all omitted — we
+      // record only the counts that matter for rate / compliance
+      // reporting. Fires regardless of output mode.
+      appendAuditEvent('ask.invoked', {
+        tool_calls_count: collected.toolsUsed.length,
+        iterations: collected.iterations,
+      });
 
       // Deduplicate proposals by category — Claude may emit the same
       // category twice across iterations (e.g. revising an amount). Keep
