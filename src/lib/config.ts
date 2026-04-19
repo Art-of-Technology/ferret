@@ -82,14 +82,17 @@ export function setConfigValue(cfg: FerretConfig, key: string, value: string): F
   const next = structuredClone(cfg) as unknown as Record<string, unknown>;
   let cursor: Record<string, unknown> = next;
   for (let i = 0; i < parts.length - 1; i++) {
-    const p = parts[i]!;
+    const p = parts[i];
+    if (p === undefined) throw new ConfigError(`Invalid config key: ${key}`);
     const existing = cursor[p];
     if (!existing || typeof existing !== 'object') {
       cursor[p] = {};
     }
     cursor = cursor[p] as Record<string, unknown>;
   }
-  cursor[parts[parts.length - 1]!] = coerce(value);
+  const last = parts[parts.length - 1];
+  if (last === undefined) throw new ConfigError(`Invalid config key: ${key}`);
+  cursor[last] = coerce(value);
   return next as unknown as FerretConfig;
 }
 

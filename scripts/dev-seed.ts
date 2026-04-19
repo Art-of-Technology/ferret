@@ -18,7 +18,11 @@ function rand(seed: number): () => number {
   };
 }
 const rng = rand(SEED);
-const pick = <T>(arr: readonly T[]): T => arr[Math.floor(rng() * arr.length)]!;
+const pick = <T>(arr: readonly T[]): T => {
+  const v = arr[Math.floor(rng() * arr.length)];
+  if (v === undefined) throw new Error('pick called on empty array');
+  return v;
+};
 
 const MERCHANTS = [
   ['Tesco', 'Groceries'],
@@ -103,7 +107,8 @@ function main(): void {
     for (let i = 0; i < 50; i++) {
       const [merchant, category] = pick(MERCHANTS);
       const amount = -Math.round(rng() * 10000) / 100;
-      const accountId = accountIds[i % 2]!;
+      const accountId = accountIds[i % accountIds.length];
+      if (accountId === undefined) throw new Error('no accounts to seed against');
       const ts = Math.floor((now - i * 86_400_000) / 1000);
       insertTxn.run(
         `seed-txn-${i.toString().padStart(4, '0')}`,
