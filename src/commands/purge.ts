@@ -112,8 +112,13 @@ export default defineCommand({
 
       // Temporarily turn off FK enforcement so we can wipe every table in a
       // single transaction without having to respect delete order mid-statement.
-      db.run(sql`PRAGMA foreign_keys = OFF`);
+      // The `try` must cover both the PRAGMA OFF *and* the transaction so that
+      // a throw from either leaves the `finally` to restore PRAGMA ON. If we
+      // only wrapped the transaction, an error inside `db.transaction` would
+      // unwind past the PRAGMA restore on some code paths and leak the OFF
+      // state into whichever process-level handle runs next.
       try {
+        db.run(sql`PRAGMA foreign_keys = OFF`);
         db.transaction((tx) => {
           for (const t of TABLES) {
             const countRow = tx.select({ n: sql<number>`count(*)` }).from(t.ref).all()[0];
