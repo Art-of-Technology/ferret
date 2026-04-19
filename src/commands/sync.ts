@@ -20,20 +20,17 @@
 import { defineCommand } from 'citty';
 import consola from 'consola';
 import { eq } from 'drizzle-orm';
+import type { BunSQLiteDatabase } from 'drizzle-orm/bun-sqlite';
 import pc from 'picocolors';
-import { db } from '../db/client';
+import { db as defaultDb } from '../db/client';
 import { markConnectionStatus } from '../db/queries/sync';
 import { connections } from '../db/schema';
+import type * as schema from '../db/schema';
 import { parseDuration } from '../lib/dates';
-import { AuthError, ValidationError } from '../lib/errors';
+import { AuthError } from '../lib/errors';
 import { TRUELAYER_CLIENT_ID, TRUELAYER_CLIENT_SECRET, resolveSecret } from '../lib/secrets';
 import { accountNames, getToken, setToken } from '../services/keychain';
-import {
-  type ConnectionSyncResult,
-  type SyncLogger,
-  type SyncSummary,
-  syncAllConnections,
-} from '../services/sync';
+import { type ConnectionSyncResult, type SyncSummary, syncAllConnections } from '../services/sync';
 import { type TokenBundle, type TokenStore, TrueLayerClient } from '../services/truelayer';
 import type { Connection } from '../types/domain';
 
@@ -53,9 +50,6 @@ export default defineCommand({
     if (sinceArg) {
       // parseDuration throws ValidationError on bad input — let it bubble.
       since = parseDuration(sinceArg);
-      if (Number.isNaN(since.getTime())) {
-        throw new ValidationError(`Invalid --since: ${sinceArg}`);
-      }
     }
 
     // Short-circuit when there are no active connections; fresh-init users
@@ -69,13 +63,8 @@ export default defineCommand({
     const clientId = await resolveSecret(TRUELAYER_CLIENT_ID);
     const clientSecret = await resolveSecret(TRUELAYER_CLIENT_SECRET);
 
-    const logger: SyncLogger = {
-      info: (m) => consola.info(m),
-      warn: (m) => consola.warn(m),
-      error: (m) => consola.error(m),
-      success: (m) => consola.success(m),
-    };
-
+    // `SyncLogger` is now `Pick<typeof consola, ...>` so consola itself is
+    // structurally assignable — no wrapper needed.
     const summary: SyncSummary = await syncAllConnections(
       {
         ...(connectionId ? { connectionId } : {}),
@@ -84,7 +73,7 @@ export default defineCommand({
       },
       {
         clientFactory: async (conn) => createClientForConnection(conn, { clientId, clientSecret }),
-        logger,
+        logger: consola,
       },
     );
 
@@ -129,9 +118,12 @@ function printConnectionResult(r: ConnectionSyncResult): void {
   }
 }
 
-function countActive(connectionId: string | undefined): number {
+type Db = BunSQLiteDatabase<typeof schema>;
+
+export function countActive(connectionId: string | undefined, db: Db = defaultDb): number {
   // Cheap pre-flight to avoid resolving secrets when there's nothing to do.
-  // Reads via the singleton db proxy.
+  // `db` is injectable for parity with the helpers in db/queries/sync.ts so
+  // tests can pass an in-memory database.
   if (connectionId) {
     const rows = db.select().from(connections).where(eq(connections.id, connectionId)).all();
     const c = rows[0];
@@ -183,8 +175,13 @@ export function createClientForConnection(
     async markNeedsReauth(): Promise<void> {
       try {
         markConnectionStatus(conn.id, 'needs_reauth', 'TrueLayer auth failed');
-      } catch {
-        // Best effort; the connection-level handler will record sync_log.
+      } catch (err) {
+        // Best effort: the connection-level handler will still record a
+        // sync_log row, but we surface the underlying DB error so it shows up
+        // in `--verbose` runs and isn't silently masked. We deliberately do
+        // not rethrow — the TokenStore contract is fire-and-forget.
+        const message = err instanceof Error ? err.message : String(err);
+        consola.warn(`Failed to mark connection ${conn.id} as needs_reauth: ${message}`);
       }
     },
   };
