@@ -14,7 +14,7 @@ import { accounts, transactions } from '../../db/schema';
 import * as schema from '../../db/schema';
 import { DataIntegrityError, ValidationError } from '../../lib/errors';
 import { parseBarclays } from './barclays';
-import { buildStrictIndex, isDuplicate, isDuplicateStrict } from './dedupe';
+import { buildLooseBuckets, buildStrictIndex, isDuplicateLoose, isDuplicateStrict } from './dedupe';
 import { parseHsbc } from './hsbc';
 import { parseLloyds } from './lloyds';
 import { parseNatwest } from './natwest';
@@ -382,10 +382,15 @@ export function runImport(
     }));
   }
 
-  // Strict mode uses an O(1) hash lookup over the narrowed window. Loose mode
-  // still iterates so it can apply substring / Levenshtein matching, but only
-  // over the narrowed window (typically a few dozen rows, not the full table).
+  // Both modes pre-build a hash index over the narrowed window so the per-row
+  // lookup is O(1) on average:
+  //   - strict: keyed on (date, amount, normalized desc) — exact match.
+  //   - loose:  keyed on (date, amount) — bucket scanned for substring /
+  //     Levenshtein. Buckets are tiny in real bank data (date + exact penny
+  //     match almost always yields 0 or 1 row), so the scan is effectively
+  //     constant. See `dedupe.ts` for the complexity analysis.
   const strictIndex = dedupeStrategy === 'strict' ? buildStrictIndex(existingForDedupe) : null;
+  const looseIndex = dedupeStrategy === 'loose' ? buildLooseBuckets(existingForDedupe) : null;
 
   let inserted = 0;
   let duplicates = 0;
@@ -403,7 +408,8 @@ export function runImport(
     const candidate = { id, date: tx.date, amount: tx.amount, description: tx.description };
     const isDup = strictIndex
       ? isDuplicateStrict(candidate, strictIndex)
-      : isDuplicate(candidate, existingForDedupe, dedupeStrategy);
+      : // biome-ignore lint/style/noNonNullAssertion: looseIndex is set whenever strictIndex isn't.
+        isDuplicateLoose(candidate, looseIndex!);
     if (isDup) {
       duplicates += 1;
       continue;
