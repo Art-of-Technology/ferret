@@ -324,6 +324,39 @@ describe('getLatestTransactionTimestamp', () => {
   test('returns null when no rows', () => {
     expect(getLatestTransactionTimestamp('a-no-rows', db)).toBeNull();
   });
+
+  test('returns Date with correct ms units (no seconds/ms confusion)', () => {
+    // Anchor: the column stores epoch *seconds* (drizzle mode: 'timestamp' on
+    // an int column). The helper must round-trip through Drizzle's column
+    // codec so the Date it returns matches the JS-millisecond value the
+    // caller stored. A naive raw `MAX(timestamp)` select would return the
+    // integer-second value and over-fetch by ~1000x if mishandled.
+    const fixed = new Date(Date.UTC(2025, 0, 15, 10, 30, 0));
+    raw
+      .prepare(
+        `INSERT INTO transactions (id, account_id, timestamp, amount, currency, description, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 'GBP', 'd', ?, ?)`,
+      )
+      .run(
+        'ts-fixed',
+        'a-units-1',
+        Math.floor(fixed.getTime() / 1000),
+        1,
+        Math.floor(REF.getTime() / 1000),
+        Math.floor(REF.getTime() / 1000),
+      );
+    raw
+      .prepare(
+        `INSERT INTO accounts (id, connection_id, account_type, display_name, currency)
+         VALUES ('a-units-1', 'c-active', 'TRANSACTION', 'Units', 'GBP')`,
+      )
+      .run();
+    const got = getLatestTransactionTimestamp('a-units-1', db);
+    expect(got).toBeInstanceOf(Date);
+    expect(got?.getTime()).toBe(fixed.getTime());
+    // Sanity: not the seconds-as-ms value.
+    expect(got?.getTime()).not.toBe(Math.floor(fixed.getTime() / 1000));
+  });
 });
 
 function mkTxn(id: string, accountId: string, ts: Date, amount: number) {
