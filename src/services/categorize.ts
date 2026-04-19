@@ -94,21 +94,29 @@ function fieldValue(txn: UncategorizedTxn, field: string): string {
 }
 
 /**
- * Apply the rule list in priority order. Returns the first matching rule
- * (highest priority wins). Caller pre-sorts via getRules(), but we don't
- * trust input order — sort defensively. Bad regex rows are skipped.
+ * Sort a rule list into the canonical apply order: priority DESC, id ASC.
+ * Returns a new array; input is not mutated. `getRules()` already returns
+ * rules in this order, so callers loading from the DB can skip this; only
+ * use it when the caller has hand-built or merged a rule list.
  */
-export function applyRules(
-  txn: UncategorizedTxn,
-  ruleList: RuleRow[],
-): { category: string; ruleId: string } | null {
-  // Stable sort: priority DESC, id ASC. Same as getRules() in case the
-  // caller hand-built the list.
-  const sorted = [...ruleList].sort((a, b) => {
+export function sortRules(ruleList: RuleRow[]): RuleRow[] {
+  return [...ruleList].sort((a, b) => {
     if (b.priority !== a.priority) return b.priority - a.priority;
     return a.id.localeCompare(b.id);
   });
-  for (const rule of sorted) {
+}
+
+/**
+ * Apply the rule list in priority order. Returns the first matching rule
+ * (highest priority wins). The list MUST be pre-sorted (priority DESC,
+ * id ASC) — `categorizeBatch` sorts once and passes it in here so we
+ * don't re-sort per transaction. Bad regex rows are skipped.
+ */
+export function applyRules(
+  txn: UncategorizedTxn,
+  sortedRules: RuleRow[],
+): { category: string; ruleId: string } | null {
+  for (const rule of sortedRules) {
     let re: RegExp;
     try {
       // Case-insensitive by default — matches user expectations
@@ -162,7 +170,10 @@ export async function categorizeBatch(
     upsertMerchantCacheEntry?: typeof defaultUpsertMerchantCacheEntry;
   } = {},
 ): Promise<CategorizationResult> {
-  const ruleList = opts.rules ?? (deps.getRules ?? defaultGetRules)();
+  // Sort the rule list once for the whole batch. `getRules()` already
+  // returns them sorted, but caller-injected `opts.rules` (tests, future
+  // overrides) may not be — sort defensively a single time, not per txn.
+  const ruleList = sortRules(opts.rules ?? (deps.getRules ?? defaultGetRules)());
   const cache = opts.merchantCache ?? (deps.loadMerchantCache ?? defaultLoadMerchantCache)();
   const writeCache = opts.writeMerchantCache ?? createDefaultCacheWriter(deps);
 
@@ -219,18 +230,36 @@ export async function categorizeBatch(
 
     for (const txn of claudeQueue) {
       const a = byId.get(txn.id);
-      const category = a?.category ?? 'Uncategorized';
-      const confidence = a?.confidence ?? 0;
-      if (category === 'Uncategorized' || confidence === 0) {
+      // Distinguish three signals:
+      //   - no assignment back from Claude (a === undefined) -> Uncategorized,
+      //     confidence is `undefined` so downstream knows it's "missing".
+      //   - explicit Uncategorized -> respect Claude's confidence (which the
+      //     wrapper guarantees is 0 for Uncategorized, but we don't conflate
+      //     "missing" with "returned zero").
+      //   - any other category -> source = claude, even at confidence 0
+      //     (a 0-confidence non-Uncategorized result is still a deliberate
+      //     pick by Claude; we record it rather than silently dropping it).
+      if (!a) {
         out.push({
           transactionId: txn.id,
           category: 'Uncategorized',
           source: 'uncategorized',
-          confidence,
         });
         counts.uncategorized += 1;
         continue;
       }
+      if (a.category === 'Uncategorized') {
+        out.push({
+          transactionId: txn.id,
+          category: 'Uncategorized',
+          source: 'uncategorized',
+          confidence: a.confidence,
+        });
+        counts.uncategorized += 1;
+        continue;
+      }
+      const category = a.category;
+      const confidence = a.confidence;
       out.push({
         transactionId: txn.id,
         category,
