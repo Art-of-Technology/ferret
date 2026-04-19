@@ -42,6 +42,15 @@ import type { ClaudeClient } from './claude';
 const MIN_ITERATIONS = 1;
 /** Hard ceiling per PRD §4.5 ("Max 10 tool iterations per ask"). */
 export const DEFAULT_MAX_ITERATIONS = 10;
+/**
+ * Per-tool-result payload cap (chars) before we feed it back to Claude.
+ * 8000 chars (~2k tokens) keeps a single oversized tool_result from
+ * blowing the conversation context while leaving plenty of room for
+ * the surrounding history and the model's reply. When truncated we
+ * append a `... [truncated, N more chars]` suffix so the model knows
+ * the payload was abridged and can hedge its answer.
+ */
+export const TOOL_RESULT_MAX_CHARS = 8000;
 
 export type AskEventType = 'token' | 'tool_call' | 'tool_result' | 'done';
 
@@ -84,12 +93,17 @@ export interface RunAskOptions {
   abortSignal?: AbortSignal;
 }
 
+// Schema column names use SQLite's snake_case form (the on-disk shape
+// Claude writes raw SQL against). The Drizzle ORM exposes camelCase to
+// TypeScript callers, but `query_transactions` runs the SQL string
+// straight through bun:sqlite — so the prompt must advertise the
+// snake_case names Claude will actually need to type.
 export const SYSTEM_PROMPT = [
   'You are Ferret, a careful financial-analysis assistant for a single-user CLI.',
   'The user owns the underlying SQLite database; every tool call is local and read-only.',
   'Prefer the high-level helpers (get_category_summary, get_recurring_payments, get_account_list) when they fit the question.',
   'Use query_transactions for ad-hoc SQL only when the helpers cannot express the request; the database enforces SELECT-only safety.',
-  'Schema: transactions(id, account_id, timestamp INTEGER seconds, amount REAL signed, currency, description, merchant_name, category, category_source, transaction_type, is_pending). accounts(id, display_name, currency, balance_current, balance_updated_at). Negative amounts are outflows.',
+  'Schema (SQLite, snake_case): transactions(id, account_id, timestamp INTEGER seconds, amount REAL signed, currency, description, merchant_name, category, category_source, transaction_type, is_pending). accounts(id, display_name, currency, balance_current, balance_updated_at). Negative amounts are outflows.',
   'Quote currency amounts with the relevant currency symbol (£ for GBP). Be concise; prefer numbers and short summaries to long prose.',
   'If a question is ambiguous, state your assumption briefly and answer based on it rather than refusing.',
 ].join(' ');
@@ -187,7 +201,9 @@ export async function* runAsk(opts: RunAskOptions): AsyncIterable<AskEvent> {
       toolResults.push({
         type: 'tool_result',
         tool_use_id: block.id,
-        content,
+        // Truncate before Claude sees it so an oversized JSON payload
+        // can't blow the model's context window.
+        content: truncateToolContent(content),
         is_error: !ok,
       });
     }
@@ -400,6 +416,17 @@ function readNumberMaybe(input: unknown, key: string): number | undefined {
     throw new ValidationError(`tool input field "${key}" must be a finite number`);
   }
   return v;
+}
+
+/**
+ * Truncate a tool_result content string to `TOOL_RESULT_MAX_CHARS`. When
+ * the payload exceeds the cap we append a sentinel so Claude can tell
+ * the result is abridged (and answer with appropriate hedging).
+ */
+export function truncateToolContent(content: string): string {
+  if (content.length <= TOOL_RESULT_MAX_CHARS) return content;
+  const dropped = content.length - TOOL_RESULT_MAX_CHARS;
+  return `${content.slice(0, TOOL_RESULT_MAX_CHARS)}... [truncated, ${dropped} more chars]`;
 }
 
 function parseToolDate(field: string, raw: string): Date {

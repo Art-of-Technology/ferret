@@ -8,8 +8,10 @@ import { describe, expect, test } from 'bun:test';
 import {
   type AskEvent,
   DEFAULT_MAX_ITERATIONS,
+  TOOL_RESULT_MAX_CHARS,
   buildToolDefs,
   runAsk,
+  truncateToolContent,
 } from '../../src/services/ask';
 import type { ClaudeMessageResponse, MessagesCreateRequest } from '../../src/services/claude';
 import type { ClaudeClient } from '../../src/services/claude';
@@ -427,6 +429,71 @@ describe('runAsk — tool error handling', () => {
     const result = events.find((e) => e.type === 'tool_result');
     expect(result?.type === 'tool_result' && result.ok).toBe(false);
     expect(result?.type === 'tool_result' && result.summary).toContain('DROP');
+  });
+});
+
+describe('truncateToolContent', () => {
+  test('passes payloads under the cap through unchanged', () => {
+    const small = JSON.stringify({ rows: [{ id: 1 }] });
+    expect(truncateToolContent(small)).toBe(small);
+  });
+
+  test('truncates and appends a sentinel when over the cap', () => {
+    const big = 'x'.repeat(TOOL_RESULT_MAX_CHARS + 500);
+    const out = truncateToolContent(big);
+    expect(out.length).toBeLessThan(big.length);
+    expect(out).toContain('... [truncated, 500 more chars]');
+  });
+});
+
+describe('runAsk — tool result truncation', () => {
+  test('oversized tool_result is truncated before reaching Claude', async () => {
+    const huge = JSON.stringify({ rows: Array.from({ length: 5000 }, (_, i) => ({ id: i })) });
+    expect(huge.length).toBeGreaterThan(TOOL_RESULT_MAX_CHARS);
+    const { client, calls } = scriptedClient([
+      {
+        id: 'm1',
+        type: 'message',
+        role: 'assistant',
+        model: 'claude-opus-4-7',
+        content: [{ type: 'tool_use', id: 'tu1', name: 'get_account_list', input: {} }],
+        stop_reason: 'tool_use',
+        stop_sequence: null,
+      },
+      {
+        id: 'm2',
+        type: 'message',
+        role: 'assistant',
+        model: 'claude-opus-4-7',
+        content: [{ type: 'text', text: 'ok' }],
+        stop_reason: 'end_turn',
+        stop_sequence: null,
+      },
+    ]);
+    await collect(
+      runAsk({
+        question: 'q',
+        claudeClient: client,
+        tools: {
+          // Force a payload large enough to trip truncation by returning a
+          // synthetic huge account list. The orchestrator stringifies via
+          // the get_account_list branch, so we just need >5k entries.
+          get_account_list: () =>
+            Array.from({ length: 5000 }, (_, i) => ({ id: `a${i}`, displayName: 'x' }) as never),
+        },
+      }),
+    );
+    const second = calls[1]?.messages ?? [];
+    const lastUser = second[second.length - 1];
+    if (!Array.isArray(lastUser?.content)) throw new Error('expected array content');
+    const tr = lastUser.content.find((b) => 'type' in b && b.type === 'tool_result') as
+      | { content: string }
+      | undefined;
+    expect(tr).toBeDefined();
+    expect(tr?.content.length).toBeLessThanOrEqual(
+      TOOL_RESULT_MAX_CHARS + ' more chars]'.length + 32,
+    );
+    expect(tr?.content).toContain('[truncated,');
   });
 });
 

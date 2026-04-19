@@ -159,10 +159,7 @@ export function detectRecurringPayments(
       })
       .from(transactions)
       .where(
-        and(
-          sql`${transactions.merchantName} = ${cand.merchant}`,
-          sql`${transactions.amount} < 0`,
-        ),
+        and(sql`${transactions.merchantName} = ${cand.merchant}`, sql`${transactions.amount} < 0`),
       )
       .all();
 
