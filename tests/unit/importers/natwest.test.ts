@@ -12,6 +12,14 @@ test('detects NatWest from header', () => {
   expect(detectFormat(FIXTURE.split('\n')[0] as string)).toBe('natwest');
 });
 
+test('does NOT misdetect a generic ledger header as NatWest', () => {
+  // Pre-fix, the signature triggered on date+account name+account number+value.
+  // A generic export with those columns but missing Type/Description should not
+  // match: the new signature requires both 'type' and 'description' headers.
+  expect(detectFormat('date,account name,account number,value')).not.toBe('natwest');
+  expect(detectFormat('date,description,account name,account number,value')).not.toBe('natwest');
+});
+
 test('parses NatWest rows preserving signed values', () => {
   const rows = parseNatwest(FIXTURE);
   expect(rows.length).toBe(2);

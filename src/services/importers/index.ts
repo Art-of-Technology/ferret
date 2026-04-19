@@ -7,14 +7,14 @@
 
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
-import { eq } from 'drizzle-orm';
+import { and, eq, gte, lte } from 'drizzle-orm';
 import type { BunSQLiteDatabase } from 'drizzle-orm/bun-sqlite';
 import { getDb } from '../../db/client';
 import { accounts, transactions } from '../../db/schema';
 import * as schema from '../../db/schema';
 import { DataIntegrityError, ValidationError } from '../../lib/errors';
 import { parseBarclays } from './barclays';
-import { isDuplicate } from './dedupe';
+import { buildStrictIndex, isDuplicate, isDuplicateStrict } from './dedupe';
 import { parseHsbc } from './hsbc';
 import { parseLloyds } from './lloyds';
 import { parseNatwest } from './natwest';
@@ -44,7 +44,22 @@ export interface ImportOptions {
   account?: string;
   dryRun?: boolean;
   dedupeStrategy?: 'strict' | 'loose';
+  /** Cap on the number of preview rows returned in dry-run output. Default 10. */
+  previewRows?: number;
 }
+
+/** Default cap for dry-run preview rows when previewRows is not set. */
+export const DEFAULT_PREVIEW_ROWS = 10;
+
+/** Days of fuzz on either side of the import batch's date range when narrowing
+ *  the dedupe candidate set. Loose mode tolerates ±1 day; we double it for
+ *  safety and to absorb any out-of-order rows the bank may emit. */
+const DEDUPE_DATE_FUZZ_DAYS = 7;
+const DEDUPE_DATE_FUZZ_MS = DEDUPE_DATE_FUZZ_DAYS * 24 * 60 * 60 * 1000;
+
+/** Multi-row INSERT chunk size. SQLite tolerates much larger but Drizzle's
+ *  parameter binding gets sluggish past a few hundred rows per statement. */
+const INSERT_CHUNK_SIZE = 500;
 
 export interface ImportResult {
   format: BankFormat;
@@ -164,11 +179,21 @@ export function detectFormat(headerLine: string): BankFormat | null {
   }
 
   // NatWest: "Date, Type, Description, Value, Balance, Account Name, Account Number"
+  // We require 'description' AND 'value' AND 'account number' AND a literal
+  // 'type' column header. The prior signature only required date + account
+  // name/number + value, which was loose enough to match generic ledger
+  // exports that happened to share those column names.
+  const hasTypeCol =
+    normalized.includes(',type,') ||
+    normalized.startsWith('type,') ||
+    normalized.endsWith(',type') ||
+    normalized.includes(', type,');
   if (
     normalized.includes('date') &&
-    normalized.includes('account name') &&
+    normalized.includes('description') &&
+    normalized.includes('value') &&
     normalized.includes('account number') &&
-    normalized.includes('value')
+    hasTypeCol
   ) {
     return 'natwest';
   }
@@ -301,30 +326,8 @@ export function runImport(
     ? (opts.account ?? 'manual:dry-run')
     : ensureAccount(db, opts.account, format);
 
-  // Dedupe within DB.
-  const existing = db
-    .select({
-      id: transactions.id,
-      timestamp: transactions.timestamp,
-      amount: transactions.amount,
-      description: transactions.description,
-    })
-    .from(transactions)
-    .where(eq(transactions.accountId, accountId))
-    .all();
-
-  const existingForDedupe = existing.map((row) => ({
-    id: row.id,
-    date: row.timestamp,
-    amount: row.amount,
-    description: row.description,
-  }));
-
-  let inserted = 0;
-  let duplicates = 0;
-  const toInsert: Array<typeof transactions.$inferInsert> = [];
-  const seenIds = new Set<string>();
-
+  // Validate every parsed row up front so the date-window narrowing below
+  // doesn't see NaN timestamps.
   for (const tx of parsed) {
     if (Number.isNaN(tx.date.getTime())) {
       throw new DataIntegrityError(
@@ -336,6 +339,60 @@ export function runImport(
         `Parsed transaction has non-finite amount: ${tx.description} / ${String(tx.amount)}`,
       );
     }
+  }
+
+  // Narrow the dedupe candidate set to the import batch's date range ±
+  // DEDUPE_DATE_FUZZ_DAYS. Without this we previously fetched every
+  // transaction for the account and compared each parsed row against all of
+  // them — O(parsed × existing). Now both modes get a bounded window, and
+  // strict mode further uses an O(1) hash index.
+  let existingForDedupe: Array<{ id: string; date: Date; amount: number; description: string }> =
+    [];
+  if (parsed.length > 0) {
+    let minTs = Number.POSITIVE_INFINITY;
+    let maxTs = Number.NEGATIVE_INFINITY;
+    for (const tx of parsed) {
+      const t = tx.date.getTime();
+      if (t < minTs) minTs = t;
+      if (t > maxTs) maxTs = t;
+    }
+    const fromDate = new Date(minTs - DEDUPE_DATE_FUZZ_MS);
+    const toDate = new Date(maxTs + DEDUPE_DATE_FUZZ_MS);
+    const existing = db
+      .select({
+        id: transactions.id,
+        timestamp: transactions.timestamp,
+        amount: transactions.amount,
+        description: transactions.description,
+      })
+      .from(transactions)
+      .where(
+        and(
+          eq(transactions.accountId, accountId),
+          gte(transactions.timestamp, fromDate),
+          lte(transactions.timestamp, toDate),
+        ),
+      )
+      .all();
+    existingForDedupe = existing.map((row) => ({
+      id: row.id,
+      date: row.timestamp,
+      amount: row.amount,
+      description: row.description,
+    }));
+  }
+
+  // Strict mode uses an O(1) hash lookup over the narrowed window. Loose mode
+  // still iterates so it can apply substring / Levenshtein matching, but only
+  // over the narrowed window (typically a few dozen rows, not the full table).
+  const strictIndex = dedupeStrategy === 'strict' ? buildStrictIndex(existingForDedupe) : null;
+
+  let inserted = 0;
+  let duplicates = 0;
+  const toInsert: Array<typeof transactions.$inferInsert> = [];
+  const seenIds = new Set<string>();
+
+  for (const tx of parsed) {
     const id = transactionHashId(accountId, tx.date, tx.amount, tx.description);
     if (seenIds.has(id)) {
       duplicates += 1;
@@ -343,13 +400,11 @@ export function runImport(
     }
     seenIds.add(id);
 
-    if (
-      isDuplicate(
-        { id, date: tx.date, amount: tx.amount, description: tx.description },
-        existingForDedupe,
-        dedupeStrategy,
-      )
-    ) {
+    const candidate = { id, date: tx.date, amount: tx.amount, description: tx.description };
+    const isDup = strictIndex
+      ? isDuplicateStrict(candidate, strictIndex)
+      : isDuplicate(candidate, existingForDedupe, dedupeStrategy);
+    if (isDup) {
       duplicates += 1;
       continue;
     }
@@ -371,20 +426,24 @@ export function runImport(
   }
 
   if (!opts.dryRun && toInsert.length > 0) {
+    // Batch into chunked multi-row INSERTs. SQLite executes one statement per
+    // chunk (vs one per row), which is materially faster on large imports.
     db.transaction((tx) => {
-      for (const row of toInsert) {
-        tx.insert(transactions).values(row).run();
+      for (let i = 0; i < toInsert.length; i += INSERT_CHUNK_SIZE) {
+        const chunk = toInsert.slice(i, i + INSERT_CHUNK_SIZE);
+        tx.insert(transactions).values(chunk).run();
       }
     });
   }
 
+  const previewCap = Math.max(0, opts.previewRows ?? DEFAULT_PREVIEW_ROWS);
   return {
     format,
     accountId,
     parsed: parsed.length,
     inserted: opts.dryRun ? 0 : inserted,
     duplicates,
-    preview: parsed.slice(0, 10),
+    preview: previewCap === 0 ? [] : parsed.slice(0, previewCap),
     dryRun: Boolean(opts.dryRun),
   };
 }
