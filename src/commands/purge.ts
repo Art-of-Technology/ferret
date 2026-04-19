@@ -6,8 +6,9 @@
 // unless explicitly kept — deletes `~/.ferret/config.json` too.
 //
 // `--confirm` is mandatory. Without it we print a dry-run summary of what
-// *would* be removed and exit with ValidationError (code 6) so the command is
-// safe to wire into non-interactive scripts.
+// *would* be removed and exit cleanly (code 0) so the command is safe to wire
+// into non-interactive scripts; the summary tells the operator to re-run with
+// `--confirm` to actually execute.
 
 import { existsSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -26,7 +27,6 @@ import {
   transactions,
 } from '../db/schema';
 import { configPath } from '../lib/config';
-import { ValidationError } from '../lib/errors';
 import { purgeAllKeychainEntries } from '../services/keychain';
 
 // Order matters for the live delete path: child rows before parents so FK
@@ -83,18 +83,26 @@ export default defineCommand({
     const cfgExists = existsSync(cfgPath);
 
     if (!confirm) {
+      // Dry-run path: print a summary of what *would* happen and exit 0.
+      // Non-interactive scripts can wire this in safely and branch on the
+      // hint text without having to special-case a non-zero exit code.
       process.stdout.write('ferret purge (dry run — pass --confirm to execute):\n');
-      process.stdout.write(`  - drop every row from ${TABLES.length} tables\n`);
-      process.stdout.write('  - clear every keychain entry under service "ferret"\n');
-      process.stdout.write(`  - remove DB file ${dbPath}${dbExists ? '' : ' (not present)'}\n`);
+      process.stdout.write(`  - would remove: all rows from ${TABLES.length} tables\n`);
+      process.stdout.write('  - would remove: every keychain entry under service "ferret"\n');
       process.stdout.write(
-        `  - remove audit log ${auditPath}${auditExists ? '' : ' (not present)'}\n`,
+        `  - would remove: DB file ${dbPath}${dbExists ? '' : ' (not present)'}\n`,
       );
       process.stdout.write(
-        `  - ${keepConfig ? 'keep' : 'remove'} config ${cfgPath}${cfgExists ? '' : ' (not present)'}\n`,
+        `  - would remove: audit log ${auditPath}${auditExists ? '' : ' (not present)'}\n`,
       );
-      if (keepRules) process.stdout.write('  - --keep-rules: rules will be JSON-dumped first\n');
-      throw new ValidationError('Refusing to purge without --confirm.');
+      process.stdout.write(
+        `  - would ${keepConfig ? 'keep' : 'remove'}: config ${cfgPath}${cfgExists ? '' : ' (not present)'}\n`,
+      );
+      if (keepRules) {
+        process.stdout.write('  - --keep-rules: rules would be JSON-dumped first\n');
+      }
+      process.stdout.write('run with --confirm to execute\n');
+      return;
     }
 
     let rowsRemoved = 0;
