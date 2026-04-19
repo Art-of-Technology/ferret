@@ -11,8 +11,11 @@
     "start": "bun run src/cli.ts",
     "check": "biome check .",
     "format": "biome format --write .",
+    "lint": "biome lint .",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
+    "bench": "bun run scripts/bench-db.ts",
+    "release": "bun run scripts/release.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "bun run src/cli.ts init"
   },
