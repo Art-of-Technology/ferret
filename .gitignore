@@ -77,4 +77,8 @@ tmp/
 temp/
 *.tmp
 
+# SBOM artifacts (generated per-release, uploaded as workflow artifacts)
+sbom.json
+sbom.*.json
+
 CLAUDE.md

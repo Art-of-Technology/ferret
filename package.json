@@ -16,6 +16,8 @@
     "test": "bun test",
     "bench": "bun run scripts/bench-db.ts",
     "release": "bun run scripts/release.ts",
+    "audit": "bun audit --audit-level=high",
+    "sbom": "bun run scripts/sbom.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "bun run src/cli.ts init"
   },
