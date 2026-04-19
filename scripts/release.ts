@@ -12,7 +12,7 @@
 //   bun run scripts/release.ts --dry-run --patch (prints what would happen)
 
 import { spawnSync } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 type Bump = 'major' | 'minor' | 'patch';
@@ -97,6 +97,141 @@ function ensureCleanTree(dryRun: boolean): void {
   }
 }
 
+/**
+ * Return the most recent `vX.Y.Z` tag, or `null` if the repo has none
+ * (e.g. the 0.1.0 release we are cutting right now).
+ */
+function lastReleaseTag(): string | null {
+  const r = spawnSync('git', ['describe', '--tags', '--abbrev=0', '--match', 'v*'], {
+    encoding: 'utf8',
+  });
+  if (r.status !== 0) return null;
+  const tag = r.stdout.trim();
+  return tag.length > 0 ? tag : null;
+}
+
+/**
+ * Collect `git log --oneline` entries since `sinceTag`. When `sinceTag` is
+ * null we fall back to every commit on the current branch so the first
+ * release can still populate a changelog section.
+ */
+function collectCommitsSince(sinceTag: string | null): string[] {
+  const range = sinceTag ? `${sinceTag}..HEAD` : 'HEAD';
+  const r = spawnSync('git', ['log', '--pretty=%s', range], { encoding: 'utf8' });
+  if (r.status !== 0) return [];
+  return r.stdout
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+}
+
+interface GroupedCommits {
+  added: string[];
+  changed: string[];
+  fixed: string[];
+  security: string[];
+  other: string[];
+}
+
+/**
+ * Map Conventional Commit prefixes to Keep-a-Changelog sections. The
+ * categorisation is intentionally best-effort — the human editing the
+ * changelog still owns the final copy, this just gives them a starting
+ * point. Commits that don't match a known prefix land in `other` so they
+ * stay visible rather than getting dropped silently.
+ */
+function groupCommits(subjects: string[]): GroupedCommits {
+  const out: GroupedCommits = { added: [], changed: [], fixed: [], security: [], other: [] };
+  for (const subj of subjects) {
+    // `fix(security): ...` takes precedence over the generic `fix:` bucket
+    // so CVE-class changes don't hide under Fixed.
+    if (/^fix\(security(?:\s|[:)])/i.test(subj)) {
+      out.security.push(subj);
+      continue;
+    }
+    if (/^feat(?:\(|:)/i.test(subj)) {
+      out.added.push(subj);
+      continue;
+    }
+    if (/^fix(?:\(|:)/i.test(subj)) {
+      out.fixed.push(subj);
+      continue;
+    }
+    if (/^(perf|refactor|revert)(?:\(|:)/i.test(subj)) {
+      out.changed.push(subj);
+      continue;
+    }
+    if (/^(docs|test|chore|style|build|ci)(?:\(|:)/i.test(subj)) {
+      // These rarely belong in a user-facing changelog. Keep them in
+      // `other` so they still render but below the headline sections.
+      out.other.push(subj);
+      continue;
+    }
+    out.other.push(subj);
+  }
+  return out;
+}
+
+/** Render a Keep-a-Changelog section for `version` from the grouped commits. */
+function renderChangelogSection(version: string, grouped: GroupedCommits): string {
+  const today = new Date().toISOString().slice(0, 10);
+  const lines: string[] = [`## [${version}] — ${today}`, ''];
+  const write = (heading: string, items: string[]): void => {
+    if (items.length === 0) return;
+    lines.push(`### ${heading}`);
+    lines.push('');
+    for (const item of items) lines.push(`- ${item}`);
+    lines.push('');
+  };
+  write('Added', grouped.added);
+  write('Changed', grouped.changed);
+  write('Fixed', grouped.fixed);
+  write('Security', grouped.security);
+  write('Other', grouped.other);
+  if (lines.length === 2) {
+    // No commits fell into any bucket — still emit a placeholder so the
+    // section exists and the human can fill it in.
+    lines.push('_No notable changes._');
+    lines.push('');
+  }
+  return lines.join('\n');
+}
+
+/**
+ * Prepend `section` to CHANGELOG.md, inserted immediately above the first
+ * existing `## [` heading (typically `## [Unreleased]` or the previous
+ * release). If the file is missing we skip silently — CHANGELOG.md is
+ * optional from the release script's perspective, the authoritative
+ * artefact is the tag.
+ */
+function updateChangelog(version: string, section: string, dryRun: boolean): void {
+  const path = join(import.meta.dir, '..', 'CHANGELOG.md');
+  if (!existsSync(path)) {
+    process.stdout.write('No CHANGELOG.md found; skipping changelog update.\n');
+    return;
+  }
+  const current = readFileSync(path, 'utf8');
+  // Anchor the insertion above the first `## [` heading so the new
+  // release lands above the previous one and the preamble (Keep a
+  // Changelog header, release policy) stays intact.
+  const anchor = current.match(/^## \[/m);
+  let next: string;
+  if (!anchor || anchor.index === undefined) {
+    // No prior release section — append to the end.
+    next = `${current.trimEnd()}\n\n${section}\n`;
+  } else {
+    const before = current.slice(0, anchor.index);
+    const after = current.slice(anchor.index);
+    next = `${before}${section}\n${after}`;
+  }
+  if (dryRun) {
+    process.stdout.write(`[dry-run] would prepend CHANGELOG.md section for ${version}\n`);
+    process.stdout.write(`${section}\n`);
+    return;
+  }
+  writeFileSync(path, next);
+}
+
 function run(cmd: string, args: string[], dryRun: boolean): void {
   const display = `${cmd} ${args.join(' ')}`;
   if (dryRun) {
@@ -138,8 +273,22 @@ function main(): void {
     writeFileSync(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`);
   }
 
+  // Build a CHANGELOG section from commit history since the previous tag
+  // (or from the root commit on a fresh repo). The file is updated before
+  // we commit so the release commit captures both the version bump and
+  // the changelog entry atomically.
+  const sinceTag = lastReleaseTag();
+  const subjects = collectCommitsSince(sinceTag);
+  const grouped = groupCommits(subjects);
+  const section = renderChangelogSection(next, grouped);
+  updateChangelog(next, section, args.dryRun);
+
   const tag = `v${next}`;
-  run('git', ['add', 'package.json'], args.dryRun);
+  const toStage = ['package.json'];
+  if (existsSync(join(import.meta.dir, '..', 'CHANGELOG.md'))) {
+    toStage.push('CHANGELOG.md');
+  }
+  run('git', ['add', ...toStage], args.dryRun);
   run('git', ['commit', '-m', `chore(release): ${tag}`], args.dryRun);
   run('git', ['tag', '-a', tag, '-m', `Release ${tag}`], args.dryRun);
 
