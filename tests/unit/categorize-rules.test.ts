@@ -1,6 +1,11 @@
 import { describe, expect, test } from 'bun:test';
 import type { RuleRow, UncategorizedTxn } from '../../src/db/queries/categorize';
-import { applyMerchantCache, applyRules, normalizeMerchant } from '../../src/services/categorize';
+import {
+  applyMerchantCache,
+  applyRules,
+  normalizeMerchant,
+  sortRules,
+} from '../../src/services/categorize';
 
 function txn(overrides: Partial<UncategorizedTxn> = {}): UncategorizedTxn {
   return {
@@ -39,10 +44,13 @@ describe('applyRules', () => {
   });
 
   test('priority DESC wins on ties of pattern matches', () => {
-    const rules: RuleRow[] = [
+    // applyRules requires a pre-sorted list (priority DESC, id ASC); sort
+    // here via sortRules() so the test exercises the same code path the
+    // pipeline does.
+    const rules: RuleRow[] = sortRules([
       rule({ id: 'low', pattern: 'Tesco', category: 'General', priority: 1 }),
       rule({ id: 'high', pattern: 'Tesco', category: 'Groceries', priority: 10 }),
-    ];
+    ]);
     const hit = applyRules(txn(), rules);
     expect(hit?.category).toBe('Groceries');
     expect(hit?.ruleId).toBe('high');
@@ -63,16 +71,32 @@ describe('applyRules', () => {
       category: 'Groceries',
       priority: 1,
     });
-    const hit = applyRules(txn({ merchantName: 'random' }), [merchantRule, descRule]);
+    const hit = applyRules(txn({ merchantName: 'random' }), sortRules([merchantRule, descRule]));
     expect(hit?.category).toBe('Groceries');
+    // Merchant rule has higher priority but doesn't match; description rule
+    // wins despite lower priority.
     expect(hit?.ruleId).toBe('d');
   });
 
   test('skips rules with invalid regex without throwing', () => {
     const broken = rule({ id: 'bad', pattern: '(', priority: 999, category: 'NOPE' });
     const good = rule({ id: 'good', pattern: '^Tesco', priority: 1 });
-    const hit = applyRules(txn(), [broken, good]);
+    const hit = applyRules(txn(), sortRules([broken, good]));
     expect(hit?.ruleId).toBe('good');
+  });
+});
+
+describe('sortRules', () => {
+  test('priority DESC, id ASC tiebreaker, does not mutate input', () => {
+    const input: RuleRow[] = [
+      rule({ id: 'b', priority: 1 }),
+      rule({ id: 'a', priority: 10 }),
+      rule({ id: 'c', priority: 10 }),
+    ];
+    const snapshot = [...input];
+    const sorted = sortRules(input);
+    expect(sorted.map((r) => r.id)).toEqual(['a', 'c', 'b']);
+    expect(input).toEqual(snapshot);
   });
 });
 
