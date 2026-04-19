@@ -3,27 +3,10 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { EXPECTED_COMMANDS } from '../helpers/expected-commands';
 
 // The auto-registry must surface every src/commands/<name>.ts file by its
 // basename. This test is the regression that proves it.
-const EXPECTED_COMMANDS = [
-  'init',
-  'link',
-  'unlink',
-  'remove',
-  'connections',
-  'sync',
-  'ls',
-  'tag',
-  'rules',
-  'ask',
-  'budget',
-  'import',
-  'export',
-  'config',
-  'version',
-  'purge',
-];
 
 test('ferret --help lists every command from src/commands/', () => {
   const tmp = mkdtempSync(join(tmpdir(), 'ferret-cli-'));
