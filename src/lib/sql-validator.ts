@@ -115,19 +115,26 @@ export function validateReadOnlySql(sql: string): void {
 
 /**
  * Strip `--`-to-EOL and `/* ... *\/` comments, respecting single-quoted
- * string literals so a literal `'--'` is preserved verbatim. SQLite's
- * standard double-quote-as-identifier is honoured (we don't treat `"`
- * as a string delimiter) since identifier quoting can't carry comment
- * tokens through.
+ * string literals AND double-quoted identifiers so a literal `'--'` or
+ * an identifier like `"weird--name"` is preserved verbatim.
+ *
+ * Why double-quotes matter: SQLite's standard quoting for identifiers is
+ * `"…"`. Earlier this stripper assumed identifiers couldn't carry comment
+ * tokens, but `SELECT "x--" FROM t; DROP TABLE t` exposes the bug — the
+ * `--` inside the identifier ate the rest of the line, hiding the
+ * trailing `;` from the multi-statement check. We now treat the contents
+ * of a double-quoted identifier as opaque (same escape rule as single
+ * quotes: `""` is a doubled-quote escape inside the identifier).
  */
 export function stripSqlComments(sql: string): string {
   let out = '';
   let i = 0;
-  let inString = false;
+  let inSingle = false;
+  let inDouble = false;
   while (i < sql.length) {
     const ch = sql[i];
     const next = sql[i + 1];
-    if (inString) {
+    if (inSingle) {
       out += ch;
       if (ch === "'") {
         // SQL string-literal escape is `''` (two single quotes).
@@ -136,13 +143,33 @@ export function stripSqlComments(sql: string): string {
           i += 2;
           continue;
         }
-        inString = false;
+        inSingle = false;
+      }
+      i += 1;
+      continue;
+    }
+    if (inDouble) {
+      out += ch;
+      if (ch === '"') {
+        // Identifier-quote escape is `""` (two double quotes).
+        if (next === '"') {
+          out += next;
+          i += 2;
+          continue;
+        }
+        inDouble = false;
       }
       i += 1;
       continue;
     }
     if (ch === "'") {
-      inString = true;
+      inSingle = true;
+      out += ch;
+      i += 1;
+      continue;
+    }
+    if (ch === '"') {
+      inDouble = true;
       out += ch;
       i += 1;
       continue;
@@ -174,26 +201,44 @@ export function stripSqlComments(sql: string): string {
 
 /**
  * Return the indices of every `;` that sits OUTSIDE a single-quoted
- * string literal in `sql`. Used by rule 3 above to detect a multi-
- * statement payload.
+ * string literal AND outside a double-quoted identifier in `sql`. Used by
+ * rule 3 above to detect a multi-statement payload. The double-quote
+ * tracking matches `stripSqlComments`'s escape rule (`""` is a doubled
+ * escape) so `SELECT "weird;name" FROM t` correctly registers zero
+ * top-level semicolons.
  */
 function findTopLevelSemicolons(sql: string): number[] {
   const out: number[] = [];
-  let inString = false;
+  let inSingle = false;
+  let inDouble = false;
   for (let i = 0; i < sql.length; i += 1) {
     const ch = sql[i];
-    if (inString) {
+    if (inSingle) {
       if (ch === "'") {
         if (sql[i + 1] === "'") {
           i += 1;
           continue;
         }
-        inString = false;
+        inSingle = false;
+      }
+      continue;
+    }
+    if (inDouble) {
+      if (ch === '"') {
+        if (sql[i + 1] === '"') {
+          i += 1;
+          continue;
+        }
+        inDouble = false;
       }
       continue;
     }
     if (ch === "'") {
-      inString = true;
+      inSingle = true;
+      continue;
+    }
+    if (ch === '"') {
+      inDouble = true;
       continue;
     }
     if (ch === ';') out.push(i);

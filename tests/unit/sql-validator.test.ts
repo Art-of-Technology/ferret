@@ -133,6 +133,38 @@ describe('validateReadOnlySql — defence in depth', () => {
     // "createdAt" contains "create" as a substring but not as a word.
     expect(() => validateReadOnlySql('SELECT createdAt FROM transactions')).not.toThrow();
   });
+
+  test('rejects double-quoted identifier comment-token smuggling', () => {
+    // Bypass: `--` inside a double-quoted identifier was previously eaten by
+    // the line-comment stripper, hiding the trailing `; DROP TABLE ...`
+    // statement from rule 3 (multi-statement detection). The validator must
+    // either treat `"x--"` as opaque identifier text (so the `--` stays
+    // intact and the trailing `;` becomes a top-level multi-statement) or
+    // catch the smuggled DROP via the original-string scan. Either way:
+    // REJECT.
+    expect(() =>
+      validateReadOnlySql('SELECT "x--" FROM transactions; DROP TABLE transactions'),
+    ).toThrow(ValidationError);
+  });
+
+  test('rejects double-quoted identifier hiding a block-comment open', () => {
+    // Symmetrical bypass with `/*` inside a double-quoted identifier: the
+    // stripper would otherwise consume everything up to the matching `*/`,
+    // potentially smuggling forbidden statements past the validator.
+    expect(() =>
+      validateReadOnlySql('SELECT "weird/*name" FROM transactions; DELETE FROM transactions'),
+    ).toThrow(ValidationError);
+  });
+
+  test('rejects multi-statement smuggle via double-quoted identifier (no forbidden token)', () => {
+    // The strongest variant: hide the `;` inside a double-quoted identifier
+    // so the stripper eats the multi-statement separator AND the second
+    // statement uses only allowed tokens. With proper double-quote tracking
+    // the trailing `;` becomes a top-level multi-statement and is rejected.
+    expect(() =>
+      validateReadOnlySql('SELECT "x--" FROM transactions; SELECT 1 FROM transactions'),
+    ).toThrow(/single statement/);
+  });
 });
 
 describe('stripSqlComments', () => {
@@ -155,5 +187,22 @@ describe('stripSqlComments', () => {
 
   test('handles escaped single quote inside literal', () => {
     expect(stripSqlComments("SELECT 'a''b' -- comment")).toBe("SELECT 'a''b' ");
+  });
+
+  test('preserves comment-like tokens inside double-quoted identifiers', () => {
+    // SQLite uses double quotes for identifier quoting; the stripper must
+    // NOT treat `--` inside `"x--"` as a line comment, otherwise an
+    // attacker can hide a trailing `; DROP ...` past the comment stripper.
+    expect(stripSqlComments('SELECT "x--" FROM t; DROP TABLE t')).toBe(
+      'SELECT "x--" FROM t; DROP TABLE t',
+    );
+    expect(stripSqlComments('SELECT "weird/*name" FROM t; DELETE FROM t')).toBe(
+      'SELECT "weird/*name" FROM t; DELETE FROM t',
+    );
+  });
+
+  test('handles escaped double quote inside identifier', () => {
+    // SQLite identifier-quoting escape is `""` (two double quotes).
+    expect(stripSqlComments('SELECT "a""b" -- comment')).toBe('SELECT "a""b" ');
   });
 });
