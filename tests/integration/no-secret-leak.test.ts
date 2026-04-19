@@ -16,12 +16,12 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { migrate } from 'drizzle-orm/bun-sqlite/migrator';
-import { getDb, resetDbCache } from '../../src/db/client';
+import { EXPECTED_COMMANDS } from '../helpers/expected-commands';
 
 const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const CLI_ENTRY = join(PROJECT_ROOT, 'src', 'cli.ts');
 const PRELOAD = join(PROJECT_ROOT, 'tests', 'integration', 'keychain-preload.ts');
+const SEED_SCRIPT = join(PROJECT_ROOT, 'tests', 'integration', 'seed-db.ts');
 
 // Canary strings. The literal substrings we assert on are short and unique so
 // a coincidental match against random help text is impossible.
@@ -33,29 +33,11 @@ const CANARIES = {
   refresh: 'CANARY-refresh-DEADBEEF',
 } as const;
 
-// Duplicated from tests/unit/cli.test.ts on purpose: we want the regression
-// suite to catch a drift if either test's list goes stale relative to the
-// registry. The cli.test.ts test exercises the "registry matches help"
-// invariant; this test exercises the "registry matches log hygiene"
-// invariant.
-const EXPECTED_COMMANDS = [
-  'init',
-  'link',
-  'unlink',
-  'remove',
-  'connections',
-  'sync',
-  'ls',
-  'tag',
-  'rules',
-  'ask',
-  'budget',
-  'import',
-  'export',
-  'config',
-  'version',
-  'purge',
-];
+// `EXPECTED_COMMANDS` lives in `tests/helpers/expected-commands.ts` so this
+// test and `tests/unit/cli.test.ts` share a single source of truth: the
+// cli.test.ts test exercises the "registry matches help" invariant; this one
+// exercises the "registry matches log hygiene" invariant against the same
+// list.
 
 // Commands that accept --verbose. The CLI currently doesn't formally declare
 // it on most commands, but running them with --verbose still exercises the
@@ -143,39 +125,36 @@ function assertNoLeak(result: RunResult): void {
 
 function seedDatabase(home: string): void {
   // Inject a connection row whose id matches the keychain stub's CANARY
-  // tokens. Done in-process (no network, no keytar). The HOME override must
-  // already be active when this is called so `getDb()` resolves to the tmp
-  // dir rather than the real ~/.ferret.
-  process.env.HOME = home;
-  const here = fileURLToPath(new URL('.', import.meta.url));
-  const migrationsDir = resolve(here, '..', '..', 'src', 'db', 'migrations');
-  resetDbCache();
-  const { db, raw } = getDb();
-  migrate(db, { migrationsFolder: migrationsDir });
-  const now = Math.floor(Date.now() / 1000);
-  raw
-    .prepare(
-      `INSERT OR IGNORE INTO connections
-         (id, provider_id, provider_name, created_at, expires_at, status)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-    )
-    .run('seed-conn-001', 'test', 'Test Bank', now, now + 86400, 'active');
-  resetDbCache();
+  // tokens. Runs in a subprocess with `HOME=home` in its env so we NEVER
+  // mutate the parent test runner's `process.env.HOME` — mutating parent env
+  // is parallel-test-hostile: any concurrently scheduled test that reads
+  // `~/.ferret` would race against the restore.
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (v !== undefined) env[k] = v;
+  }
+  env.HOME = home;
+  env.NO_COLOR = '1';
+  env.NODE_ENV = 'production';
+  const res = Bun.spawnSync({
+    cmd: ['bun', 'run', SEED_SCRIPT],
+    cwd: PROJECT_ROOT,
+    env,
+    stdout: 'pipe',
+    stderr: 'pipe',
+  });
+  if (res.exitCode !== 0) {
+    throw new Error(
+      `seed-db subprocess failed (exit ${res.exitCode}):\n` +
+        `--- stdout ---\n${res.stdout.toString()}\n` +
+        `--- stderr ---\n${res.stderr.toString()}`,
+    );
+  }
 }
 
 test('no canary secret leaks into any command output', () => {
   const home = mkdtempSync(join(tmpdir(), 'ferret-leak-'));
-  const prevHome = process.env.HOME;
-  try {
-    seedDatabase(home);
-  } finally {
-    // Restore the parent process HOME; children get `home` via buildEnv.
-    if (prevHome === undefined) {
-      process.env.HOME = '';
-    } else {
-      process.env.HOME = prevHome;
-    }
-  }
+  seedDatabase(home);
 
   const runs: RunResult[] = [];
 
