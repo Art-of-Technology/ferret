@@ -29,14 +29,17 @@ async function getBackend(): Promise<KeychainBackend> {
   if (loadAttempted) {
     throw new ConfigError('Keychain backend unavailable.');
   }
-  loadAttempted = true;
   try {
     // Dynamic import keeps this module test-friendly: if keytar fails to load
     // (no native binding for current platform), we surface a typed error.
+    // Only flip `loadAttempted` AFTER a successful import so a transient
+    // failure (e.g. ENOENT for native binding mid-install) can be retried by
+    // a subsequent call instead of being permanently latched.
     const mod = (await import('keytar')) as unknown as KeychainBackend & {
       default?: KeychainBackend;
     };
     backend = mod.default ?? mod;
+    loadAttempted = true;
     return backend;
   } catch (err) {
     throw new ConfigError(
