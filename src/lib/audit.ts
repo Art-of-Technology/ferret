@@ -22,15 +22,16 @@ import {
   closeSync,
   existsSync,
   constants as fsConstants,
+  fstatSync,
   mkdirSync,
   openSync,
   readFileSync,
+  readSync,
   renameSync,
-  statSync,
   writeSync,
 } from 'node:fs';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { getFerretHome } from '../db/client';
 
 /** Event names emitted by Ferret. Keep in sync with issue #48. */
 export type AuditEventType =
@@ -61,15 +62,6 @@ const SECRET_KEY_PATTERN = /(token|secret|api_?key|password|refresh|authorizatio
 
 /** Sentinel the redactor substitutes in for suppressed values. */
 export const REDACTED = '[REDACTED]';
-
-/**
- * Mirror of `getFerretHome()` from `src/db/client.ts` — computed lazily so
- * tests that override `HOME` via `mktemp` pick up the new value per-call.
- * Do NOT cache at module scope.
- */
-function getFerretHome(): string {
-  return join(process.env.HOME ?? homedir(), '.ferret');
-}
 
 /** Absolute path to the current audit log. */
 export function getAuditLogPath(): string {
@@ -108,14 +100,14 @@ export function redactSecrets(input: Record<string, unknown>, depth = 0): Record
 }
 
 /**
- * Rotate the log if it exceeds {@link ROTATE_BYTES}. Single rollover: if a
- * previous `audit.log.1` exists it is overwritten. Best-effort — errors
- * swallowed so a rotation failure never blocks a caller.
+ * Rotate `path` to `${path}.1`, overwriting any previous rotated file. Used
+ * both by the inline "check size on the same fd" path in
+ * {@link appendAuditEvent} and by the test-only {@link rotateIfNeeded} entry
+ * point. Best-effort — errors swallowed so a rotation failure never blocks
+ * a caller.
  */
-function maybeRotate(path: string): void {
+function rotateNow(path: string): void {
   try {
-    const st = statSync(path);
-    if (st.size < ROTATE_BYTES) return;
     const rotated = `${path}.1`;
     renameSync(path, rotated);
     // chmod the rotated file explicitly in case the rename lands on a FS
@@ -127,8 +119,21 @@ function maybeRotate(path: string): void {
       /* best effort */
     }
   } catch {
-    // statSync fails if the file doesn't exist yet — that's the common
+    // rename fails if the file doesn't exist yet — that's the common
     // first-call case. Nothing to do.
+  }
+}
+
+/**
+ * Size check that closes the TOCTOU window: we inspect the file via the fd
+ * we've just opened, rather than `statSync`ing the path a moment before
+ * opening it. Returns `true` if the caller should rotate before writing.
+ */
+function shouldRotateFd(fd: number): boolean {
+  try {
+    return fstatSync(fd).size >= ROTATE_BYTES;
+  } catch {
+    return false;
   }
 }
 
@@ -156,7 +161,6 @@ export function appendAuditEvent(type: AuditEventType, fields: Record<string, un
   try {
     ensureHome();
     const path = getAuditLogPath();
-    maybeRotate(path);
 
     const payload = {
       ts: new Date().toISOString(),
@@ -169,12 +173,18 @@ export function appendAuditEvent(type: AuditEventType, fields: Record<string, un
     // them, so the `\n` terminator is unambiguous.
     const line = `${JSON.stringify(payload)}\n`;
 
-    const fd = openSync(
-      path,
-      // eslint-disable-next-line no-bitwise -- standard POSIX flag combination
-      fsConstants.O_APPEND | fsConstants.O_CREAT | fsConstants.O_WRONLY,
-      0o600,
-    );
+    // Open first, then size-check via fstatSync on the fd — this closes the
+    // TOCTOU window where another writer could grow the file between a
+    // path-level statSync and the open that followed it. If we need to
+    // rotate we close, rename, and reopen a fresh 0600 file.
+    // eslint-disable-next-line no-bitwise -- standard POSIX flag combination
+    const openFlags = fsConstants.O_APPEND | fsConstants.O_CREAT | fsConstants.O_WRONLY;
+    let fd = openSync(path, openFlags, 0o600);
+    if (shouldRotateFd(fd)) {
+      closeSync(fd);
+      rotateNow(path);
+      fd = openSync(path, openFlags, 0o600);
+    }
     try {
       writeSync(fd, line);
     } finally {
@@ -204,7 +214,7 @@ export function appendAuditEvent(type: AuditEventType, fields: Record<string, un
 export function tailAuditLog(n: number): Array<Record<string, unknown>> {
   const path = getAuditLogPath();
   if (!existsSync(path)) return [];
-  const raw = readFileSync(path, 'utf-8');
+  const raw = readTailBytes(path);
   const lines = raw.split('\n').filter((l) => l.length > 0);
   const tail = n >= lines.length ? lines : lines.slice(lines.length - n);
   const out: Array<Record<string, unknown>> = [];
@@ -219,10 +229,59 @@ export function tailAuditLog(n: number): Array<Record<string, unknown>> {
 }
 
 /**
+ * Read either the whole file (if under {@link TAIL_WHOLE_FILE_LIMIT}) or the
+ * last {@link TAIL_WINDOW_BYTES} bytes. For the windowed path we drop the
+ * first line of what we read in case we sliced mid-line — the caller only
+ * cares about the tail, not the head of the window. This keeps memory and
+ * wall-clock flat once the log is in the hundreds-of-KiB range (100k lines
+ * is ~18 MiB at typical shape — reading the whole thing spikes ~50ms).
+ */
+function readTailBytes(path: string): string {
+  let fd: number | null = null;
+  try {
+    fd = openSync(path, fsConstants.O_RDONLY);
+    const size = fstatSync(fd).size;
+    if (size <= TAIL_WHOLE_FILE_LIMIT) {
+      closeSync(fd);
+      fd = null;
+      return readFileSync(path, 'utf-8');
+    }
+    const window = Math.min(TAIL_WINDOW_BYTES, size);
+    const buf = Buffer.alloc(window);
+    readSync(fd, buf, 0, window, size - window);
+    const text = buf.toString('utf-8');
+    // If we didn't start at byte 0, the first line is almost certainly a
+    // partial — drop it.
+    const firstNewline = text.indexOf('\n');
+    return firstNewline === -1 ? '' : text.slice(firstNewline + 1);
+  } catch {
+    return '';
+  } finally {
+    if (fd !== null) closeSync(fd);
+  }
+}
+
+/** Threshold below which `tailAuditLog` just reads the whole file. */
+const TAIL_WHOLE_FILE_LIMIT = 1 * 1024 * 1024;
+/** Window size used when tailing a file larger than {@link TAIL_WHOLE_FILE_LIMIT}. */
+const TAIL_WINDOW_BYTES = 64 * 1024;
+
+/**
  * Manually invoke the rotation check. Exposed for tests; the normal path
- * rotates lazily inside {@link appendAuditEvent}.
+ * rotates lazily inside {@link appendAuditEvent}. Uses the same fd-based
+ * size check as the normal path so the TOCTOU semantics are identical.
  */
 export function rotateIfNeeded(): void {
   const path = getAuditLogPath();
-  maybeRotate(path);
+  if (!existsSync(path)) return;
+  let fd: number | null = null;
+  try {
+    fd = openSync(path, fsConstants.O_RDONLY);
+    if (!shouldRotateFd(fd)) return;
+  } catch {
+    return;
+  } finally {
+    if (fd !== null) closeSync(fd);
+  }
+  rotateNow(path);
 }
