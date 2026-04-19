@@ -121,5 +121,17 @@ export function formatDate(d: Date, fmt = 'yyyy-MM-dd'): string {
     const day = d.getUTCDate().toString().padStart(2, '0');
     return `${y}-${m}-${day}`;
   }
-  return dfFormat(d, fmt);
+  // date-fns' `format` reads the Date's *local* fields. To stay UTC-consistent
+  // with the rest of this library we build a shim Date whose local fields
+  // mirror the original UTC fields, then hand that to date-fns.
+  const utcShim = new Date(
+    d.getUTCFullYear(),
+    d.getUTCMonth(),
+    d.getUTCDate(),
+    d.getUTCHours(),
+    d.getUTCMinutes(),
+    d.getUTCSeconds(),
+    d.getUTCMilliseconds(),
+  );
+  return dfFormat(utcShim, fmt);
 }

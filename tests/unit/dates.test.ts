@@ -106,6 +106,13 @@ describe('formatDate', () => {
     expect(formatDate(d, 'yyyy/MM/dd')).toMatch(/2026\/04\/19/);
   });
 
+  test('custom format uses UTC components, not local timezone', () => {
+    // 2026-04-19T23:30:00Z renders as the same calendar day everywhere even
+    // though `new Date(...).getDate()` shifts in many local timezones.
+    const d = new Date(Date.UTC(2026, 3, 19, 23, 30, 0));
+    expect(formatDate(d, 'yyyy-MM-dd HH:mm')).toBe('2026-04-19 23:30');
+  });
+
   test('throws on invalid Date', () => {
     expect(() => formatDate(new Date('not-a-date'))).toThrow(ValidationError);
   });
