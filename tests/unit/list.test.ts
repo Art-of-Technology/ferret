@@ -214,4 +214,60 @@ describe('listTransactions', () => {
     expect(() => listTransactions({ limit: 0 }, db)).toThrow();
     expect(() => listTransactions({ limit: -5 }, db)).toThrow();
   });
+
+  test('throws when --limit exceeds MAX_LIMIT instead of silently clamping', () => {
+    expect(() => listTransactions({ limit: 100_000 }, db)).toThrow(/exceeds the maximum/);
+  });
+
+  test('escapes LIKE metacharacters in merchant filter', () => {
+    // None of the seeded merchants contain `_` or `%`, so a query for
+    // `Tesco_X` (literal underscore) must match nothing rather than treating
+    // `_` as a single-character wildcard that would match `Tesco`.
+    const rows = listTransactions({ merchant: 'Tesco_X' }, db);
+    expect(rows.length).toBe(0);
+  });
+
+  test('escapes literal % in merchant filter', () => {
+    const rows = listTransactions({ merchant: '%' }, db);
+    expect(rows.length).toBe(0);
+  });
+
+  test('direction=incoming excludes zero-amount transactions', () => {
+    const localTmp = mkdtempSync(join(tmpdir(), 'ferret-list-zero-'));
+    const localPath = join(localTmp, 'test.db');
+    const localRaw = new Database(localPath, { create: true });
+    const localDb = drizzle(localRaw, { schema });
+    if (existsSync(migrationsFolder)) {
+      migrate(localDb, { migrationsFolder });
+    }
+    localRaw
+      .prepare(
+        `INSERT INTO connections (id, provider_id, provider_name, created_at, expires_at, status)
+         VALUES ('c', 'manual', 'B', ?, ?, 'active')`,
+      )
+      .run(sec(REF), sec(REF) + 86_400);
+    localRaw
+      .prepare(
+        `INSERT INTO accounts (id, connection_id, account_type, display_name, currency)
+         VALUES ('a', 'c', 'TRANSACTION', 'A', 'GBP')`,
+      )
+      .run();
+    const ins = localRaw.prepare(
+      `INSERT INTO transactions (id, account_id, timestamp, amount, currency, description,
+        merchant_name, transaction_type, category, category_source, created_at, updated_at)
+       VALUES (?, 'a', ?, ?, 'GBP', 'd', 'M', 'DEBIT', 'C', 'cache', ?, ?)`,
+    );
+    const ts = sec(REF);
+    ins.run('zero', ts, 0, ts, ts);
+    ins.run('pos', ts, 10, ts, ts);
+    ins.run('neg', ts, -10, ts, ts);
+
+    const incoming = listTransactions({ direction: 'incoming' }, localDb);
+    expect(incoming.map((r) => r.id)).toEqual(['pos']);
+    const outgoing = listTransactions({ direction: 'outgoing' }, localDb);
+    expect(outgoing.map((r) => r.id)).toEqual(['neg']);
+
+    localRaw.close();
+    rmSync(localTmp, { recursive: true, force: true });
+  });
 });

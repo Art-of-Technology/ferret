@@ -3,7 +3,7 @@
 // txn_category_idx, txn_merchant_idx) so we hit the perf target of < 200ms on
 // 100k rows (PRD §11.1). We never SELECT * and filter in JS.
 
-import { type SQL, and, asc, desc, eq, gte, like, lte, or } from 'drizzle-orm';
+import { type SQL, and, asc, desc, eq, gt, gte, lt, lte, or, sql } from 'drizzle-orm';
 import type { BunSQLiteDatabase } from 'drizzle-orm/bun-sqlite';
 import { ValidationError } from '../../lib/errors';
 import { db as defaultDb } from '../client';
@@ -70,8 +70,11 @@ export function listTransactions(
   if (filters.merchant && filters.merchant.length > 0) {
     // Case-insensitive substring match. SQLite's LIKE is case-insensitive for
     // ASCII by default; that's good enough for merchant names.
+    // We escape the LIKE metacharacters with a backslash and tell SQLite to
+    // treat `\` as the ESCAPE character so user input like `Amazon_Prime`
+    // matches the literal underscore rather than any single character.
     const pattern = `%${escapeLike(filters.merchant)}%`;
-    conditions.push(like(transactions.merchantName, pattern));
+    conditions.push(sql`${transactions.merchantName} LIKE ${pattern} ESCAPE '\\'`);
   }
   if (filters.accountId && filters.accountId.length > 0) {
     // Match against either accounts.id (UUID) or accounts.displayName.
@@ -103,10 +106,12 @@ export function listTransactions(
     );
     if (maxFilter) conditions.push(maxFilter);
   }
+  // A £0 transaction is neither inflow nor outflow, so direction filters use
+  // strict comparisons and exclude zero-amount rows from both buckets.
   if (filters.direction === 'incoming') {
-    conditions.push(gte(transactions.amount, 0));
+    conditions.push(gt(transactions.amount, 0));
   } else if (filters.direction === 'outgoing') {
-    conditions.push(lte(transactions.amount, 0));
+    conditions.push(lt(transactions.amount, 0));
   }
 
   const sort = filters.sort ?? { field: 'timestamp' as const, dir: 'desc' as const };
@@ -146,7 +151,13 @@ function clampLimit(limit: number | undefined): number {
   if (!Number.isFinite(limit) || limit <= 0) {
     throw new ValidationError(`--limit must be a positive integer, got ${limit}`);
   }
-  return Math.min(Math.floor(limit), MAX_LIMIT);
+  const floored = Math.floor(limit);
+  if (floored > MAX_LIMIT) {
+    throw new ValidationError(
+      `--limit ${floored} exceeds the maximum of ${MAX_LIMIT}. Lower the limit and re-run.`,
+    );
+  }
+  return floored;
 }
 
 function resolveSortColumn(field: ListSortField) {
@@ -167,7 +178,10 @@ function resolveSortColumn(field: ListSortField) {
 }
 
 function escapeLike(input: string): string {
-  // We don't currently use an ESCAPE clause; strip the LIKE metacharacters
-  // (% and _) so they're treated as literals in user input.
-  return input.replace(/[\\%_]/g, '');
+  // Escape LIKE metacharacters so user input like `Amazon_Prime` is matched
+  // literally rather than treating `_` as a single-char wildcard. The order
+  // matters: backslash must be escaped first so we don't double-escape the
+  // backslashes we add for `%` and `_`. The caller pairs this with
+  // `LIKE ... ESCAPE '\\'` so SQLite knows `\` is the escape character.
+  return input.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
 }
