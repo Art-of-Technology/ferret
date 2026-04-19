@@ -71,31 +71,85 @@ function daysInMonthUTC(d: Date): number {
   return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)).getUTCDate();
 }
 
-function monthLabel(d: Date): string {
+// Exported so the command layer can reuse the same month formatting
+// without duplicating the MONTH_NAMES array.
+export function monthLabel(d: Date): string {
   const name = MONTH_NAMES[d.getUTCMonth()] ?? '';
   return `${name} ${d.getUTCFullYear()}`;
 }
 
-// SQL: SUM of absolute outflow for a category over [from, to).
-function sumOutflow(category: string, from: Date, to: Date): number {
+// SQL: SUM of absolute outflow grouped by category over [from, to).
+// Returns a Map keyed by category for O(1) lookup. The COALESCE on the
+// aggregate guarantees a non-null number at runtime, so the column is typed
+// `sql<number>` (not `number | null`) to match reality.
+function sumOutflowByCategory(from: Date, to: Date): Map<string, number> {
   const { db } = getDb();
   const rows = db
     .select({
-      total: sql<number | null>`COALESCE(SUM(ABS(${transactions.amount})), 0)`,
+      category: transactions.category,
+      total: sql<number>`COALESCE(SUM(ABS(${transactions.amount})), 0)`,
     })
     .from(transactions)
     .where(
       and(
-        eq(transactions.category, category),
         sql`${transactions.amount} < 0`,
         gte(transactions.timestamp, from),
         lt(transactions.timestamp, to),
       ),
     )
+    .groupBy(transactions.category)
     .all();
-  const first = rows[0];
-  const total = first?.total;
-  return typeof total === 'number' ? total : 0;
+  const map = new Map<string, number>();
+  for (const r of rows) {
+    if (r.category == null) continue;
+    map.set(r.category, typeof r.total === 'number' ? r.total : 0);
+  }
+  return map;
+}
+
+// SQL: SUM of absolute outflow grouped by (category, year-month) across the
+// supplied window [from, to). Returns a nested map: yearMonthKey -> category ->
+// spent. yearMonthKey is "YYYY-MM" computed in UTC to mirror the JS month math.
+function sumOutflowByCategoryAndMonth(from: Date, to: Date): Map<string, Map<string, number>> {
+  const { db } = getDb();
+  // SQLite stores timestamps as unix seconds (integer mode 'timestamp'); use
+  // strftime over datetime(unixepoch) to bucket by UTC year-month.
+  const rows = db
+    .select({
+      category: transactions.category,
+      yearMonth: sql<string>`strftime('%Y-%m', datetime(${transactions.timestamp}, 'unixepoch'))`,
+      total: sql<number>`COALESCE(SUM(ABS(${transactions.amount})), 0)`,
+    })
+    .from(transactions)
+    .where(
+      and(
+        sql`${transactions.amount} < 0`,
+        gte(transactions.timestamp, from),
+        lt(transactions.timestamp, to),
+      ),
+    )
+    .groupBy(
+      sql`strftime('%Y-%m', datetime(${transactions.timestamp}, 'unixepoch'))`,
+      transactions.category,
+    )
+    .all();
+  const out = new Map<string, Map<string, number>>();
+  for (const r of rows) {
+    if (r.category == null || r.yearMonth == null) continue;
+    let inner = out.get(r.yearMonth);
+    if (!inner) {
+      inner = new Map<string, number>();
+      out.set(r.yearMonth, inner);
+    }
+    inner.set(r.category, typeof r.total === 'number' ? r.total : 0);
+  }
+  return out;
+}
+
+function yearMonthKey(d: Date): string {
+  const y = d.getUTCFullYear();
+  const m = d.getUTCMonth() + 1;
+  return `${y}-${m < 10 ? `0${m}` : m}`;
 }
 
 export function setBudget(category: string, monthlyAmount: number, currency: string): Budget {
@@ -156,9 +210,12 @@ export function getCurrentMonthBudgets(now: Date = new Date()): BudgetWithProgre
   // Clamp to [1, totalDays] so the projection math never divides by zero.
   const daysElapsed = Math.max(1, Math.min(totalDays, now.getUTCDate()));
 
+  // Single grouped query covers every budget category at once (was N+1).
+  const spentByCategory = sumOutflowByCategory(monthStart, monthEnd);
+
   const out: BudgetWithProgress[] = [];
   for (const b of all) {
-    const spent = sumOutflow(b.category, monthStart, monthEnd);
+    const spent = spentByCategory.get(b.category) ?? 0;
     const percent = b.monthlyAmount > 0 ? (spent / b.monthlyAmount) * 100 : 0;
     const projected = (spent / daysElapsed) * totalDays;
     out.push({
@@ -182,15 +239,21 @@ export function getHistoricalBudgets(months: number, now: Date = new Date()): Mo
   const { db } = getDb();
   const all = db.select().from(budgets).all();
 
+  // Bound the query window once for the whole history span, then pivot in JS.
+  // Was: months * budgets COUNT separate SUM queries.
+  const oldestRef = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - (months - 1), 1));
+  const windowStart = startOfMonthUTC(oldestRef);
+  const windowEnd = startOfNextMonthUTC(now);
+  const spentByMonth = sumOutflowByCategoryAndMonth(windowStart, windowEnd);
+
   const result: MonthlyBudgetView[] = [];
   // Walk from oldest to newest so output reads chronologically.
   for (let offset = months - 1; offset >= 0; offset--) {
     const ref = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - offset, 1));
-    const monthStart = startOfMonthUTC(ref);
-    const monthEnd = startOfNextMonthUTC(ref);
+    const monthMap = spentByMonth.get(yearMonthKey(ref));
     const rows: MonthlyBudgetRow[] = [];
     for (const b of all) {
-      const spent = sumOutflow(b.category, monthStart, monthEnd);
+      const spent = monthMap?.get(b.category) ?? 0;
       const percent = b.monthlyAmount > 0 ? (spent / b.monthlyAmount) * 100 : 0;
       rows.push({
         category: b.category,
