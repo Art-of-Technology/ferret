@@ -24,6 +24,7 @@ import {
   upsertAccount,
 } from '../db/queries/sync';
 import type * as schema from '../db/schema';
+import { appendAuditEvent } from '../lib/audit';
 import { loadConfig } from '../lib/config';
 import { AuthError, FerretError } from '../lib/errors';
 import type { Account, Connection, NewTransaction } from '../types/domain';
@@ -146,6 +147,16 @@ export async function syncAllConnections(
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
       ctx.logger?.error(`[${conn.providerName}] ${errorMessage}`);
+      // Connection-level failure (i.e. a throw that escaped syncConnection,
+      // typically an AuthError on /accounts). `syncConnection` itself emits
+      // the `sync.started` event before it can throw, so we only need the
+      // failure half here. Error class, not message, is recorded — messages
+      // may contain URLs or provider-side detail worth keeping out of the
+      // long-lived audit file.
+      appendAuditEvent('sync.failed', {
+        connection_id: conn.id,
+        error_class: err instanceof Error ? err.constructor.name : 'unknown',
+      });
       const completedAt = now();
       const durationMs = completedAt.getTime() - startedAt.getTime();
       const status: ConnectionSyncResult['status'] = 'failed';
@@ -212,6 +223,16 @@ export async function syncConnection(
   const db = ctx.db ?? defaultDb;
   const now = ctx.now;
   const logger = ctx.logger;
+
+  // Audit boundary: one `sync.started` per connection attempted. The
+  // orchestrator records the matching success/partial/failure below (or
+  // catches a throw at the caller and emits `sync.failed` there). `dry_run`
+  // is part of the shape so we can later tell real syncs apart from
+  // `--dry-run` rehearsals during audits.
+  appendAuditEvent('sync.started', {
+    connection_id: conn.id,
+    dry_run: Boolean(opts.dryRun),
+  });
 
   const config = safeLoadConfig();
   const defaultHistoryDays = clampHistoryDays(
@@ -324,6 +345,27 @@ export async function syncConnection(
       },
       db,
     );
+  }
+
+  // Audit: terminal state for this connection. Counts are already
+  // PRD-sanctioned user-local data (no merchant names, no amounts).
+  // `sync.failed` here is the "all accounts failed" shape; a throw that
+  // escapes this function produces `sync.failed` in the orchestrator
+  // catch-block instead.
+  if (status === 'failed') {
+    appendAuditEvent('sync.failed', {
+      connection_id: conn.id,
+      accounts: accountCount,
+    });
+  } else {
+    appendAuditEvent('sync.completed', {
+      connection_id: conn.id,
+      status,
+      accounts: accountCount,
+      transactions_added: totalAdded,
+      transactions_updated: totalUpdated,
+      duration_ms: completedAt.getTime() - startedAt.getTime(),
+    });
   }
 
   return {
