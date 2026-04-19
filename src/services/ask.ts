@@ -20,10 +20,11 @@
 import {
   type CategorySummaryRow,
   type RecurringPaymentRow,
+  type RunReadOnlyQueryResult,
   detectRecurringPayments,
   getAccountList,
   getCategorySummary,
-  runReadOnlyQuery,
+  runReadOnlyQueryWithMeta,
 } from '../db/queries/analytics';
 import { loadConfig } from '../lib/config';
 import { FerretError, ValidationError } from '../lib/errors';
@@ -51,8 +52,12 @@ export type AskEvent =
   | { type: 'done'; stopReason: ClaudeMessageResponse['stop_reason']; iterations: number };
 
 export interface AskTools {
-  /** SELECT-only SQL passthrough. Validated before execution. */
-  query_transactions: (input: { sql: string; params?: unknown[] }) => Record<string, unknown>[];
+  /**
+   * SELECT-only SQL passthrough. Validated before execution. Returns the
+   * (capped) row payload plus a `truncated` flag the orchestrator forwards
+   * to Claude so the model knows the answer may be incomplete.
+   */
+  query_transactions: (input: { sql: string; params?: unknown[] }) => RunReadOnlyQueryResult;
   /** Per-category sum over a date range. */
   get_category_summary: (input: { from: string; to: string }) => CategorySummaryRow[];
   /** Recurring-payment detection. */
@@ -247,7 +252,8 @@ export function buildToolDefs(): ClaudeTool[] {
 function bindDefaultTools(overrides?: Partial<AskTools>): AskTools {
   return {
     query_transactions:
-      overrides?.query_transactions ?? ((input) => runReadOnlyQuery(input.sql, input.params ?? [])),
+      overrides?.query_transactions ??
+      ((input) => runReadOnlyQueryWithMeta(input.sql, input.params ?? [])),
     get_category_summary:
       overrides?.get_category_summary ??
       ((input) =>
@@ -280,11 +286,14 @@ async function invokeTool(
       case 'query_transactions': {
         const sql = readString(input, 'sql');
         const params = readArrayMaybe(input, 'params');
-        const rows = tools.query_transactions({ sql, params });
+        const result = tools.query_transactions({ sql, params });
+        const summarySuffix = result.truncated ? ' (truncated)' : '';
         return {
           ok: true,
-          summary: `query_transactions -> ${rows.length} rows`,
-          content: JSON.stringify({ rows }),
+          summary: `query_transactions -> ${result.rows.length} rows${summarySuffix}`,
+          // Include the truncated flag in the wire payload so Claude can
+          // hedge its answer when the result was capped.
+          content: JSON.stringify({ rows: result.rows, truncated: result.truncated }),
         };
       }
       case 'get_category_summary': {

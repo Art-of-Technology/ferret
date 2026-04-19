@@ -199,33 +199,76 @@ export interface RunReadOnlyQueryOptions {
   raw?: Database;
 }
 
+export interface RunReadOnlyQueryResult {
+  /** Capped row payload (length <= maxRows). */
+  rows: Record<string, unknown>[];
+  /** True when the database had at least one row beyond the cap. */
+  truncated: boolean;
+}
+
 /**
  * Execute a Claude-supplied SQL string. The query is validated as
  * SELECT-only (PRD §4.5 safety) before it ever reaches `bun:sqlite`.
  *
  * Result row count is capped at `max_context_transactions` from config
  * (default 500) so a `SELECT * FROM transactions` against a 100k-row DB
- * doesn't blow Claude's per-call token budget. The cap is applied
- * post-hoc rather than by rewriting the SQL — preserving the model's
- * intent makes debugging easier; the user just sees a truncated set.
+ * doesn't blow Claude's per-call token budget. The cap is pushed down
+ * into SQLite via a `LIMIT cap+1` wrapper so a pathological query
+ * (e.g. `SELECT * FROM transactions` against 1M rows) doesn't
+ * materialize the full result set in memory before truncation. We
+ * always wrap rather than appending, because the user's SELECT may
+ * already carry its own LIMIT/ORDER BY whose semantics we'd corrupt by
+ * slapping another LIMIT on the end. `cap + 1` lets us detect when the
+ * cap was hit so the caller can warn.
+ *
+ * Backward-compat: callers that ignore the result shape still get
+ * `Record<string, unknown>[]` via `runReadOnlyQuery`. New callers that
+ * need the truncation flag use `runReadOnlyQueryWithMeta`.
  *
  * Parameters are positional `?` bindings forwarded straight to bun:sqlite.
+ */
+export function runReadOnlyQueryWithMeta(
+  sqlText: string,
+  params: unknown[] = [],
+  opts: RunReadOnlyQueryOptions = {},
+): RunReadOnlyQueryResult {
+  validateReadOnlySql(sqlText);
+  const cap = resolveRowCap(opts.maxRows);
+  const raw = opts.raw ?? getDb().raw;
+  const wrapped = wrapWithRowCap(sqlText, cap);
+  const stmt = raw.prepare(wrapped);
+  // bun:sqlite's `.all(...params)` accepts a spread or a single array
+  // positional. We always spread so the caller's array shape is preserved.
+  // biome-ignore lint/suspicious/noExplicitAny: bun:sqlite accepts heterogenous bind params.
+  const rows = stmt.all(...(params as any[])) as unknown as Record<string, unknown>[];
+  if (rows.length > cap) {
+    return { rows: rows.slice(0, cap), truncated: true };
+  }
+  return { rows, truncated: false };
+}
+
+/**
+ * Backward-compatible wrapper around `runReadOnlyQueryWithMeta`. Returns
+ * just the (capped) row array without the truncation flag.
  */
 export function runReadOnlyQuery(
   sqlText: string,
   params: unknown[] = [],
   opts: RunReadOnlyQueryOptions = {},
 ): Record<string, unknown>[] {
-  validateReadOnlySql(sqlText);
-  const cap = resolveRowCap(opts.maxRows);
-  const raw = opts.raw ?? getDb().raw;
-  const stmt = raw.prepare(sqlText);
-  // bun:sqlite's `.all(...params)` accepts a spread or a single array
-  // positional. We always spread so the caller's array shape is preserved.
-  // biome-ignore lint/suspicious/noExplicitAny: bun:sqlite accepts heterogenous bind params.
-  const rows = stmt.all(...(params as any[])) as unknown as Record<string, unknown>[];
-  if (rows.length > cap) return rows.slice(0, cap);
-  return rows;
+  return runReadOnlyQueryWithMeta(sqlText, params, opts).rows;
+}
+
+/**
+ * Wrap a user SELECT in a subquery with `LIMIT cap+1` so SQLite stops
+ * fetching once we have enough rows to detect overflow. We strip a
+ * single trailing `;` because nesting `(SELECT …;)` is a parse error in
+ * SQLite. The validator has already guaranteed the input is a single
+ * SELECT statement, so this stays safe.
+ */
+function wrapWithRowCap(sqlText: string, cap: number): string {
+  const trimmed = sqlText.trim().replace(/;\s*$/, '');
+  return `SELECT * FROM (${trimmed}) LIMIT ${cap + 1}`;
 }
 
 function resolveRowCap(override?: number): number {
