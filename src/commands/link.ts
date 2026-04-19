@@ -12,7 +12,7 @@ import { defineCommand } from 'citty';
 import consola from 'consola';
 import { getDb } from '../db/client';
 import { accounts, connections } from '../db/schema';
-import { AuthError, ConfigError } from '../lib/errors';
+import { AuthError, DataIntegrityError, ValidationError } from '../lib/errors';
 import { TRUELAYER_CLIENT_ID, TRUELAYER_CLIENT_SECRET, resolveSecret } from '../lib/secrets';
 import { accountNames, setToken } from '../services/keychain';
 import { runOAuthFlow } from '../services/oauth';
@@ -41,11 +41,13 @@ function buildAuthUrl(args: {
   return u.toString();
 }
 
-function maskAccountNumber(num: string | undefined): string | null {
+// Per PRD §9.3, account numbers are masked only at the display layer.
+// We store the full digits-only value (file already chmod 0600 per §9.2)
+// and let the rendering layer truncate to last-4 when shown to humans.
+function normalizeAccountNumber(num: string | undefined): string | null {
   if (!num) return null;
   const digits = num.replace(/\D/g, '');
-  if (digits.length <= 4) return digits;
-  return digits.slice(-4);
+  return digits.length > 0 ? digits : null;
 }
 
 export default defineCommand({
@@ -71,9 +73,14 @@ export default defineCommand({
     const providers = (args.provider as string | undefined) ?? DEFAULT_PROVIDERS;
     const scope = (args.scope as string | undefined) ?? DEFAULT_SCOPE;
     const timeoutSecondsRaw = args.timeout as string | undefined;
-    const timeoutMs = timeoutSecondsRaw
-      ? Math.max(10, Number.parseInt(timeoutSecondsRaw, 10)) * 1000
-      : undefined;
+    let timeoutMs: number | undefined;
+    if (timeoutSecondsRaw !== undefined) {
+      const parsed = Number.parseInt(timeoutSecondsRaw, 10);
+      if (Number.isNaN(parsed) || parsed <= 0) {
+        throw new ValidationError('--timeout must be a positive integer (seconds)');
+      }
+      timeoutMs = Math.max(10, parsed) * 1000;
+    }
 
     consola.info(`Starting OAuth flow (providers=${providers})`);
 
@@ -131,17 +138,26 @@ export default defineCommand({
 
     const { db } = getDb();
     const now = new Date();
-    db.insert(connections)
-      .values({
-        id: connectionId,
-        providerId: meResult.provider.provider_id,
-        providerName: meResult.provider.display_name,
-        createdAt: now,
-        expiresAt: connExpiresAt,
-        status: 'active',
-        lastSyncedAt: null,
-      })
-      .run();
+    // Bun's drizzle SQLite driver runs `.run()` synchronously and surfaces
+    // failures via thrown exceptions; wrap so a constraint or IO error becomes
+    // a typed DataIntegrityError instead of an unhandled rejection.
+    try {
+      db.insert(connections)
+        .values({
+          id: connectionId,
+          providerId: meResult.provider.provider_id,
+          providerName: meResult.provider.display_name,
+          createdAt: now,
+          expiresAt: connExpiresAt,
+          status: 'active',
+          lastSyncedAt: null,
+        })
+        .run();
+    } catch (err) {
+      throw new DataIntegrityError(
+        `Failed to persist connection row for ${meResult.provider.display_name}: ${(err as Error).message}`,
+      );
+    }
 
     // Best-effort: fetch accounts list so the user can immediately see what
     // was linked. Failures here do not abort the link, since `ferret sync`
@@ -165,7 +181,7 @@ export default defineCommand({
               displayName: a.display_name,
               iban: a.account_number?.iban ?? null,
               sortCode: a.account_number?.sort_code ?? null,
-              accountNumber: maskAccountNumber(a.account_number?.number),
+              accountNumber: normalizeAccountNumber(a.account_number?.number),
               currency: a.currency,
               balanceAvailable: null,
               balanceCurrent: null,
@@ -190,11 +206,16 @@ export default defineCommand({
 });
 
 // A no-op store used during the initial /me call; we manage persistence
-// ourselves once the connection id is known.
+// ourselves once the connection id is known. `initialTokens` is always passed
+// to the client, so `load()` should never fire — if it does, that's a logic
+// bug on the caller's side, not a config problem.
 function createInertStore() {
   return {
-    async load() {
-      throw new ConfigError('inert store: load() should not be called during initial linking');
+    async load(): Promise<never> {
+      throw new Error(
+        'createInertStore: load() invoked, but the inert store has no persisted tokens. ' +
+          'Pass initialTokens to TrueLayerClient before any request that may trigger a refresh.',
+      );
     },
     async save() {
       // ignore

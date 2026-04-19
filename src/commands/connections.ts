@@ -53,6 +53,11 @@ export default defineCommand({
     const { db } = getDb();
     const rows = db.select().from(connections).orderBy(desc(connections.createdAt)).all();
 
+    if (rows.length === 0) {
+      process.stdout.write(pc.dim('No connections. Run `ferret link` to add one.\n'));
+      return;
+    }
+
     const table = new Table({
       head: ['ID', 'Provider', 'Status', 'Expires', 'Last sync'],
       style: { head: ['bold'], border: [] },
@@ -70,8 +75,5 @@ export default defineCommand({
     }
 
     process.stdout.write(`${table.toString()}\n`);
-    if (rows.length === 0) {
-      process.stdout.write(pc.dim('No connections. Run `ferret link` to add one.\n'));
-    }
   },
 });
