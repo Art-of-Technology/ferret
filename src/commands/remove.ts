@@ -39,15 +39,18 @@ export default defineCommand({
 
     const { db } = getDb();
 
-    const targetIds: string[] = all
-      ? db
-          .select({ id: connections.id })
-          .from(connections)
-          .all()
-          .map((c) => c.id)
-      : [connectionId];
-
-    if (!all) {
+    let targetIds: string[];
+    if (all) {
+      targetIds = db
+        .select({ id: connections.id })
+        .from(connections)
+        .all()
+        .map((c) => c.id);
+      if (targetIds.length === 0) {
+        consola.info('No connections to remove.');
+        return;
+      }
+    } else {
       const row = db
         .select({ id: connections.id })
         .from(connections)
@@ -56,11 +59,7 @@ export default defineCommand({
       if (!row) {
         throw new ValidationError(`No connection with id "${connectionId}".`);
       }
-    }
-
-    if (targetIds.length === 0) {
-      consola.info('No connections to remove.');
-      return;
+      targetIds = [row.id];
     }
 
     let keychainRemoved = 0;
