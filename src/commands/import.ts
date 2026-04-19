@@ -1,6 +1,11 @@
 import { defineCommand } from 'citty';
 import { ValidationError } from '../lib/errors';
-import { BANK_FORMATS, type BankFormat, parseImport } from '../services/importers';
+import {
+  BANK_FORMATS,
+  type BankFormat,
+  DEFAULT_PREVIEW_ROWS,
+  parseImport,
+} from '../services/importers';
 
 export default defineCommand({
   meta: { name: 'import', description: 'Import transactions from CSV' },
@@ -15,6 +20,10 @@ export default defineCommand({
     'dedupe-strategy': {
       type: 'string',
       description: 'strict | loose (default strict)',
+    },
+    'preview-rows': {
+      type: 'string',
+      description: `Number of rows shown under --dry-run (default ${DEFAULT_PREVIEW_ROWS})`,
     },
   },
   run({ args }) {
@@ -32,11 +41,23 @@ export default defineCommand({
       throw new ValidationError(`Invalid dedupe strategy: ${dedupeArg}. Use 'strict' or 'loose'.`);
     }
 
+    let previewRows: number | undefined;
+    if (args['preview-rows'] !== undefined) {
+      const n = Number.parseInt(String(args['preview-rows']), 10);
+      if (!Number.isFinite(n) || n < 0) {
+        throw new ValidationError(
+          `Invalid --preview-rows: ${String(args['preview-rows'])}. Expected a non-negative integer.`,
+        );
+      }
+      previewRows = n;
+    }
+
     const result = parseImport(file, {
       format: formatArg as BankFormat | undefined,
       account: args.account ? String(args.account) : undefined,
       dryRun: Boolean(args['dry-run']),
       dedupeStrategy: (dedupeArg ?? 'strict') as 'strict' | 'loose',
+      previewRows,
     });
 
     const banner = result.dryRun ? '[dry-run] ' : '';

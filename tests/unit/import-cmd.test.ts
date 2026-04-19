@@ -113,3 +113,28 @@ test('parseImport throws ValidationError when file does not exist', async () => 
   const { db } = getDb(DB_PATH);
   expect(() => parseImport(join(tmp, 'nonexistent.csv'), {}, { db })).toThrow(/File not found/);
 });
+
+test('parseImport honours previewRows option (dry-run preview cap)', async () => {
+  // Build a CSV with 12 rows to exercise both default cap (10) and a custom 3.
+  const header =
+    'Transaction Date,Transaction Type,Sort Code,Account Number,Transaction Description,Debit Amount,Credit Amount,Balance';
+  const lines = [header];
+  for (let i = 1; i <= 12; i++) {
+    const dd = String(i).padStart(2, '0');
+    lines.push(`${dd}/05/2026,DEB,30-99-50,12345678,PREVIEW ROW ${i},1.00,,100.00`);
+  }
+  const csvPath = join(tmp, 'lloyds-preview.csv');
+  writeFileSync(csvPath, lines.join('\n'));
+
+  const { parseImport } = await import('../../src/services/importers');
+  const { db } = getDb(DB_PATH);
+
+  const def = parseImport(csvPath, { format: 'lloyds', dryRun: true }, { db });
+  expect(def.preview.length).toBe(10);
+
+  const custom = parseImport(csvPath, { format: 'lloyds', dryRun: true, previewRows: 3 }, { db });
+  expect(custom.preview.length).toBe(3);
+
+  const zero = parseImport(csvPath, { format: 'lloyds', dryRun: true, previewRows: 0 }, { db });
+  expect(zero.preview.length).toBe(0);
+});
