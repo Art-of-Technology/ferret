@@ -122,6 +122,12 @@ export default defineCommand({
       // the last value the user saw streamed.
       const dedupedProposals = dedupeProposals(collected.proposals);
 
+      // Apply once, up front, when --apply is set. Both render paths
+      // (JSON + plain) consume the same `applyResults` so there's a
+      // single call regardless of output mode.
+      const applyResults =
+        apply && dedupedProposals.length > 0 ? applyBudgetProposals(dedupedProposals) : undefined;
+
       if (wantJson) {
         const out = {
           question,
@@ -138,15 +144,13 @@ export default defineCommand({
             currency: p.currency,
             rationale: p.rationale,
           })),
-          applied_budgets: apply
-            ? applyBudgetProposals(dedupedProposals).map((r) => ({
-                category: r.category,
-                monthly_amount: r.monthlyAmount,
-                currency: r.currency,
-                ok: r.ok,
-                error: r.error,
-              }))
-            : undefined,
+          applied_budgets: applyResults?.map((r) => ({
+            category: r.category,
+            monthly_amount: r.monthlyAmount,
+            currency: r.currency,
+            ok: r.ok,
+            error: r.error,
+          })),
           iterations: collected.iterations,
           stop_reason: collected.stopReason,
         };
@@ -156,7 +160,7 @@ export default defineCommand({
         // Add a trailing newline so the next shell prompt is on its own line.
         if (!collected.answer.endsWith('\n')) process.stdout.write('\n');
         if (dedupedProposals.length > 0) {
-          renderProposals(dedupedProposals, apply);
+          renderProposals(dedupedProposals, applyResults);
         }
       }
 
@@ -272,8 +276,17 @@ function applyBudgetProposals(proposals: BudgetProposal[]): ApplyResult[] {
   return out;
 }
 
-/** Pretty-print proposals + either an apply summary or paste-ready commands. */
-function renderProposals(proposals: BudgetProposal[], apply: boolean): void {
+/**
+ * Render proposals + either an apply summary (if `applyResults` is provided
+ * by the caller — meaning --apply was set and budgets were already written)
+ * or paste-ready commands. This function is purely view code; the write
+ * happens at the call site in `run()` so there is exactly one
+ * `applyBudgetProposals` call per command invocation.
+ */
+function renderProposals(
+  proposals: BudgetProposal[],
+  applyResults: ApplyResult[] | undefined,
+): void {
   process.stdout.write('\n');
   process.stdout.write(picocolors.bold('Proposed budgets:\n'));
   for (const p of proposals) {
@@ -282,12 +295,11 @@ function renderProposals(proposals: BudgetProposal[], apply: boolean): void {
     process.stdout.write(`  ${picocolors.cyan(p.category)}: ${amt}${why}\n`);
   }
   process.stdout.write('\n');
-  if (apply) {
-    const results = applyBudgetProposals(proposals);
-    const okCount = results.filter((r) => r.ok).length;
-    const failCount = results.length - okCount;
+  if (applyResults) {
+    const okCount = applyResults.filter((r) => r.ok).length;
+    const failCount = applyResults.length - okCount;
     process.stdout.write(picocolors.bold(`Applied: ${okCount} ok, ${failCount} failed\n`));
-    for (const r of results) {
+    for (const r of applyResults) {
       if (!r.ok) {
         process.stdout.write(`  ${picocolors.red('✗')} ${r.category}: ${r.error ?? 'failed'}\n`);
       }
