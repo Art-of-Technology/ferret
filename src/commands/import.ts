@@ -1,4 +1,5 @@
 import { defineCommand } from 'citty';
+import { appendAuditEvent } from '../lib/audit';
 import { ValidationError } from '../lib/errors';
 import {
   BANK_FORMATS,
@@ -64,6 +65,16 @@ export default defineCommand({
     process.stdout.write(
       `${banner}format=${result.format} account=${result.accountId} parsed=${result.parsed} inserted=${result.inserted} duplicates=${result.duplicates}\n`,
     );
+
+    // Audit trail: completion is only recorded for real runs (not dry-run).
+    // Per issue #48 we log counts only — never the filename / absolute path.
+    if (!result.dryRun) {
+      appendAuditEvent('import.completed', {
+        format: result.format,
+        rows_added: result.inserted,
+        rows_duplicate: result.duplicates,
+      });
+    }
 
     if (result.dryRun && result.preview.length > 0) {
       process.stdout.write('preview:\n');
