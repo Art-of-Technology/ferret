@@ -17,6 +17,7 @@ import {
   getAccountList,
   getCategorySummary,
   runReadOnlyQuery,
+  runReadOnlyQueryWithMeta,
 } from '../../src/db/queries/analytics';
 import * as schema from '../../src/db/schema';
 import { ValidationError } from '../../src/lib/errors';
@@ -230,5 +231,46 @@ describe('runReadOnlyQuery', () => {
   test('caps results at the supplied maxRows', () => {
     const rows = runReadOnlyQuery('SELECT id FROM transactions', [], { raw, maxRows: 3 });
     expect(rows.length).toBe(3);
+  });
+
+  test('runReadOnlyQueryWithMeta sets truncated=true when row cap is hit', () => {
+    // Seed has > 3 transactions; cap at 3 forces truncation.
+    const result = runReadOnlyQueryWithMeta('SELECT id FROM transactions', [], {
+      raw,
+      maxRows: 3,
+    });
+    expect(result.rows.length).toBe(3);
+    expect(result.truncated).toBe(true);
+  });
+
+  test('runReadOnlyQueryWithMeta sets truncated=false when under the cap', () => {
+    const result = runReadOnlyQueryWithMeta(
+      'SELECT id FROM transactions WHERE merchant_name = ?',
+      ['Netflix'],
+      { raw, maxRows: 100 },
+    );
+    expect(result.rows.length).toBe(3);
+    expect(result.truncated).toBe(false);
+  });
+
+  test('row cap survives a trailing semicolon in the user SQL', () => {
+    // The wrapper has to strip a trailing `;` before nesting the SELECT.
+    const result = runReadOnlyQueryWithMeta('SELECT id FROM transactions;', [], {
+      raw,
+      maxRows: 2,
+    });
+    expect(result.rows.length).toBe(2);
+    expect(result.truncated).toBe(true);
+  });
+
+  test('row cap respects a user-supplied LIMIT smaller than the cap', () => {
+    // The wrapper preserves user LIMIT semantics by nesting; user asked for
+    // 1, gets 1, no truncation flag.
+    const result = runReadOnlyQueryWithMeta('SELECT id FROM transactions LIMIT 1', [], {
+      raw,
+      maxRows: 100,
+    });
+    expect(result.rows.length).toBe(1);
+    expect(result.truncated).toBe(false);
   });
 });
