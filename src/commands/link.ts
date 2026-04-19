@@ -20,6 +20,7 @@ import {
   AUTH_BASE,
   DEFAULT_PROVIDERS,
   DEFAULT_SCOPE,
+  EndpointNotSupportedError,
   TrueLayerClient,
 } from '../services/truelayer';
 import type { TrueLayerAccount, TrueLayerMeResult } from '../types/truelayer';
@@ -159,39 +160,79 @@ export default defineCommand({
       );
     }
 
-    // Best-effort: fetch accounts list so the user can immediately see what
+    // Best-effort: fetch accounts + cards so the user can immediately see what
     // was linked. Failures here do not abort the link, since `ferret sync`
-    // will re-fetch accounts as part of normal operation.
+    // will re-fetch these as part of normal operation. Card-only providers
+    // (Amex) return 501 on /accounts — that's a capability gap, not an error.
     let accountRows: TrueLayerAccount[] = [];
     try {
       const accountsResp = await client.getAccounts();
       accountRows = accountsResp.results;
     } catch (err) {
-      consola.warn(`Linked successfully but failed to list accounts: ${(err as Error).message}`);
+      if (!(err instanceof EndpointNotSupportedError)) {
+        consola.warn(`Linked successfully but failed to list accounts: ${(err as Error).message}`);
+      }
     }
 
-    if (accountRows.length > 0) {
-      for (const a of accountRows) {
-        try {
-          db.insert(accounts)
-            .values({
-              id: a.account_id,
-              connectionId,
-              accountType: a.account_type,
-              displayName: a.display_name,
-              iban: a.account_number?.iban ?? null,
-              sortCode: a.account_number?.sort_code ?? null,
-              accountNumber: normalizeAccountNumber(a.account_number?.number),
-              currency: a.currency,
-              balanceAvailable: null,
-              balanceCurrent: null,
-              balanceUpdatedAt: null,
-              isManual: false,
-            })
-            .run();
-        } catch (err) {
-          consola.warn(`Skipped account ${a.account_id.slice(0, 8)}…: ${(err as Error).message}`);
-        }
+    let cardRows: Array<{
+      account_id: string;
+      display_name: string;
+      partial_card_number?: string;
+      currency: string;
+    }> = [];
+    try {
+      const cardsResp = await client.getCards();
+      cardRows = cardsResp.results;
+    } catch {
+      // Providers without cards return 501 / 403 here; silently ignore.
+    }
+
+    let discovered = 0;
+    for (const a of accountRows) {
+      try {
+        db.insert(accounts)
+          .values({
+            id: a.account_id,
+            connectionId,
+            accountType: a.account_type,
+            displayName: a.display_name,
+            iban: a.account_number?.iban ?? null,
+            sortCode: a.account_number?.sort_code ?? null,
+            accountNumber: normalizeAccountNumber(a.account_number?.number),
+            currency: a.currency,
+            balanceAvailable: null,
+            balanceCurrent: null,
+            balanceUpdatedAt: null,
+            isManual: false,
+          })
+          .run();
+        discovered += 1;
+      } catch (err) {
+        consola.warn(`Skipped account ${a.account_id.slice(0, 8)}…: ${(err as Error).message}`);
+      }
+    }
+
+    for (const c of cardRows) {
+      try {
+        db.insert(accounts)
+          .values({
+            id: c.account_id,
+            connectionId,
+            accountType: 'CREDIT_CARD',
+            displayName: c.display_name,
+            iban: null,
+            sortCode: null,
+            accountNumber: normalizeAccountNumber(c.partial_card_number),
+            currency: c.currency,
+            balanceAvailable: null,
+            balanceCurrent: null,
+            balanceUpdatedAt: null,
+            isManual: false,
+          })
+          .run();
+        discovered += 1;
+      } catch (err) {
+        consola.warn(`Skipped card ${c.account_id.slice(0, 8)}…: ${(err as Error).message}`);
       }
     }
 
@@ -199,8 +240,11 @@ export default defineCommand({
       `Connected: ${meResult.provider.display_name} (expires ${connExpiresAt.toISOString().slice(0, 10)})`,
     );
     consola.info(`Connection id: ${connectionId}`);
-    if (accountRows.length > 0) {
-      consola.info(`Discovered ${accountRows.length} account(s).`);
+    if (discovered > 0) {
+      const parts: string[] = [];
+      if (accountRows.length > 0) parts.push(`${accountRows.length} account(s)`);
+      if (cardRows.length > 0) parts.push(`${cardRows.length} card(s)`);
+      consola.info(`Discovered ${parts.join(' + ')}.`);
     }
   },
 });

@@ -18,7 +18,7 @@ import { migrate } from 'drizzle-orm/bun-sqlite/migrator';
 import * as schema from '../../src/db/schema';
 import { AuthError } from '../../src/lib/errors';
 import { syncAllConnections, syncConnection } from '../../src/services/sync';
-import type { TrueLayerClient } from '../../src/services/truelayer';
+import { EndpointNotSupportedError, type TrueLayerClient } from '../../src/services/truelayer';
 import type { Connection } from '../../src/types/domain';
 import type {
   TrueLayerAccount,
@@ -402,6 +402,46 @@ describe('syncAllConnections', () => {
     };
     expect(acc.account_type).toBe('CREDIT_CARD');
     expect(acc.balance_current).toBe(-200);
+  });
+
+  test('card-only provider: /accounts 501 falls through to /cards without failing sync', async () => {
+    // Mirrors Amex behavior: TrueLayer returns 501 endpoint_not_supported on
+    // /accounts because the provider has no deposit accounts. The sync must
+    // swallow the capability gap and carry on to /cards, not mark the whole
+    // connection as failed.
+    seedConnection({ id: 'c-amex', providerName: 'American Express' });
+    const card = {
+      account_id: 'card-amex',
+      card_network: 'AMEX',
+      card_type: 'CREDIT',
+      currency: 'GBP',
+      display_name: 'Amex Platinum',
+      provider: { provider_id: 'uk-ob-amex', display_name: 'American Express' },
+    };
+    const client = fakeClient({
+      cards: [card],
+      cardTransactions: { 'card-amex': [txn('ctx-1', REF, -42)] },
+      cardBalances: { 'card-amex': { available: 0, current: -120, currency: 'GBP' } },
+      throws: {
+        getAccounts: new EndpointNotSupportedError(
+          'TrueLayer GET /accounts not supported by provider',
+        ),
+      },
+    });
+
+    const summary = await syncAllConnections(
+      {},
+      { clientFactory: () => client, db, now: () => REF },
+    );
+
+    expect(summary.results[0]?.status).toBe('success');
+    expect(summary.accounts).toBe(1);
+    expect(summary.transactionsAdded).toBe(1);
+
+    const row = raw.prepare('SELECT account_type FROM accounts WHERE id = ?').get('card-amex') as {
+      account_type: string;
+    };
+    expect(row.account_type).toBe('CREDIT_CARD');
   });
 
   test('balance_updated_at is set on every account after sync', async () => {

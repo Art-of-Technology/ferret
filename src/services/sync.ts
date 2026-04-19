@@ -33,7 +33,7 @@ import type {
   TrueLayerCardBalance,
   TrueLayerTransaction,
 } from '../types/truelayer';
-import type { TokenBundle, TrueLayerClient } from './truelayer';
+import { EndpointNotSupportedError, type TokenBundle, type TrueLayerClient } from './truelayer';
 
 type Db = BunSQLiteDatabase<typeof schema>;
 
@@ -226,8 +226,24 @@ export async function syncConnection(
   const perAccount: AccountSyncResult[] = [];
 
   // -------- Accounts (transaction / savings) --------
-  const accountsResp = await client.getAccounts();
-  for (const remote of accountsResp.results) {
+  // Card-only providers (e.g. Amex) return 501 on /accounts — that's a
+  // capability gap, not a broken connection. Swallow it and fall through to
+  // /cards. Any other error is real and should bubble up to the caller so the
+  // connection is marked failed / needs_reauth as appropriate.
+  let accountResults: TrueLayerAccount[] = [];
+  try {
+    const resp = await client.getAccounts();
+    accountResults = resp.results;
+  } catch (err) {
+    if (err instanceof EndpointNotSupportedError) {
+      logger?.info(
+        `[${conn.providerName}] provider has no /accounts endpoint; checking /cards instead.`,
+      );
+    } else {
+      throw err;
+    }
+  }
+  for (const remote of accountResults) {
     accountCount += 1;
     const result = await syncOneAccount({
       connection: conn,
@@ -253,10 +269,9 @@ export async function syncConnection(
     const resp = await client.getCards();
     cardResults = resp.results;
   } catch (err) {
-    // Surface as a non-fatal warning; cards endpoint absence shouldn't fail
-    // the connection. AuthErrors must still bubble up because they indicate a
-    // dead connection rather than an unsupported endpoint.
-    if (err instanceof AuthError) throw err;
+    // Cards is optional — 403 means consent didn't grant cards scope, 501
+    // means the provider has no cards endpoint. Either way, carry on with
+    // whatever /accounts produced.
     logger?.warn(`[${conn.providerName}] cards endpoint unavailable: ${(err as Error).message}`);
   }
   for (const card of cardResults) {

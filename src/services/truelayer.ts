@@ -26,10 +26,24 @@ import type {
   TrueLayerTransactionsResponse,
 } from '../types/truelayer';
 
+/**
+ * Raised when TrueLayer returns 501 `endpoint_not_supported`, which means the
+ * selected provider doesn't implement this endpoint at all (e.g. Amex has no
+ * `/accounts`, only `/cards`). Callers should fall through to the sibling
+ * endpoint, not treat the connection as broken. Extends NetworkError so
+ * existing `instanceof NetworkError` handlers still behave sensibly, while
+ * allowing specific callers to distinguish capability gaps from real faults.
+ */
+export class EndpointNotSupportedError extends NetworkError {}
+
 export const AUTH_BASE = 'https://auth.truelayer.com';
 export const DATA_BASE = 'https://api.truelayer.com/data/v1';
 
-export const DEFAULT_SCOPE = 'info accounts balance transactions offline_access';
+// `cards` is a distinct TrueLayer scope from `accounts`; without it, every
+// /cards request is rejected with 403 regardless of provider — including for
+// banks that *do* issue credit cards (e.g. Lloyds). PRD §8.1 lists the /cards
+// endpoints but forgot to grant the scope — treat this string as the fix.
+export const DEFAULT_SCOPE = 'info accounts balance cards transactions offline_access';
 export const DEFAULT_PROVIDERS = 'uk-oauth-all';
 
 export interface TrueLayerCredentials {
@@ -323,9 +337,11 @@ export class TrueLayerClient {
         continue;
       }
 
-      // 403 → flagged for re-consent, no retry.
+      // 403 → forbidden, no retry. Don't auto-mark needs-reauth here: a 403
+      // on an optional endpoint (e.g. /cards when cards scope wasn't granted)
+      // does NOT mean the whole connection is dead. The caller has endpoint
+      // context and will decide whether to bubble this up or swallow it.
       if (res.status === 403) {
-        await this.store.markNeedsReauth().catch(() => undefined);
         const text = await safeReadText(res);
         throw new AuthError(
           `TrueLayer ${method} ${path} forbidden (403): ${truncate(text, 300)}. Re-link required.`,
@@ -345,6 +361,19 @@ export class TrueLayerClient {
         await this.sleepFn(backoff);
         attempt += 1;
         continue;
+      }
+
+      // 501 → provider doesn't implement this endpoint (e.g. Amex has no
+      // /accounts, only /cards). Terminal and non-retryable. Throw a tagged
+      // error so callers can recognize it and fall through to a sibling
+      // endpoint instead of treating the whole connection as broken.
+      if (res.status === 501) {
+        const text = await safeReadText(res);
+        const parsed = safeParseJson<TrueLayerErrorBody>(text);
+        const detail = parsed?.error_description ?? parsed?.message ?? text;
+        throw new EndpointNotSupportedError(
+          `TrueLayer ${method} ${path} not supported by provider: ${truncate(detail, 300)}`,
+        );
       }
 
       // 5xx → exponential backoff with jitter.

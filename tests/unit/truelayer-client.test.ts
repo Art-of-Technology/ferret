@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import {
+  EndpointNotSupportedError,
   type FetchLike,
   type TokenBundle,
   type TokenStore,
@@ -149,12 +150,15 @@ describe('TrueLayerClient', () => {
     expect(store.reauthCalls).toBe(1);
   });
 
-  test('marks connection needing re-consent on 403 (no retry)', async () => {
+  test('throws AuthError on 403 without auto-marking reauth (no retry)', async () => {
+    // Caller has endpoint context and decides whether a 403 kills the whole
+    // connection (e.g. /accounts) or is just a missing optional scope (e.g.
+    // /cards). The client must not toggle connection status on its own.
     const store = new StubStore(freshBundle());
     const { fetch, calls } = mockFetch([{ status: 403, body: { error: 'forbidden' } }]);
     const client = new TrueLayerClient({ credentials, store, fetch });
     await expect(client.getAccounts()).rejects.toThrow(/forbidden/);
-    expect(store.reauthCalls).toBe(1);
+    expect(store.reauthCalls).toBe(0);
     expect(calls).toHaveLength(1);
   });
 
@@ -200,6 +204,32 @@ describe('TrueLayerClient', () => {
     expect(calls).toHaveLength(3);
     // attempt 0: base * 2^0 = 250ms; attempt 1: base * 2^1 = 500ms (no jitter w/ random=0)
     expect(sleeps).toEqual([250, 500]);
+  });
+
+  test('throws EndpointNotSupportedError on 501 without retrying', async () => {
+    // Amex and other card-only providers return 501 on /accounts. This is a
+    // capability gap (terminal), not a transient fault — the client must not
+    // retry and must throw a distinguishable error so the sync layer can fall
+    // through to /cards.
+    const store = new StubStore(freshBundle());
+    const { fetch, calls } = mockFetch([
+      {
+        status: 501,
+        body: {
+          error: 'endpoint_not_supported',
+          error_description: 'Feature not supported by the provider',
+        },
+      },
+    ]);
+    const client = new TrueLayerClient({
+      credentials,
+      store,
+      fetch,
+      sleep: async () => {},
+      random: () => 0,
+    });
+    await expect(client.getAccounts()).rejects.toBeInstanceOf(EndpointNotSupportedError);
+    expect(calls).toHaveLength(1);
   });
 
   test('gives up after maxRetries on persistent 5xx', async () => {
