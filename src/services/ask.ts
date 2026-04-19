@@ -17,6 +17,8 @@
 // The orchestrator is deliberately stateless across invocations (PRD
 // §9.4: no persistent conversation between asks).
 
+import { eq } from 'drizzle-orm';
+import { getDb } from '../db/client';
 import {
   type CategorySummaryRow,
   type RecurringPaymentRow,
@@ -26,6 +28,8 @@ import {
   getCategorySummary,
   runReadOnlyQueryWithMeta,
 } from '../db/queries/analytics';
+import { defaultCurrency } from '../db/queries/budgets';
+import { categories } from '../db/schema';
 import { loadConfig } from '../lib/config';
 import { FerretError, ValidationError } from '../lib/errors';
 import type { Account } from '../types/domain';
@@ -58,7 +62,20 @@ export type AskEvent =
   | { type: 'token'; text: string }
   | { type: 'tool_call'; name: string; input: unknown }
   | { type: 'tool_result'; name: string; ok: boolean; summary: string }
-  | { type: 'done'; stopReason: ClaudeMessageResponse['stop_reason']; iterations: number };
+  | {
+      type: 'done';
+      stopReason: ClaudeMessageResponse['stop_reason'];
+      iterations: number;
+      proposals?: BudgetProposal[];
+    };
+
+/** A single budget Claude has proposed via `propose_budgets`. */
+export interface BudgetProposal {
+  category: string;
+  monthlyAmount: number;
+  currency: string;
+  rationale?: string;
+}
 
 export interface AskTools {
   /**
@@ -73,6 +90,16 @@ export interface AskTools {
   get_recurring_payments: (input: { min_occurrences?: number }) => RecurringPaymentRow[];
   /** Account roster + balances. */
   get_account_list: () => Account[];
+  /**
+   * Stage one or more budget proposals. Does NOT write to the DB — the CLI
+   * collects accumulated proposals from the `done` event and either prints
+   * them as paste-ready commands or applies them via `setBudget()` when the
+   * user passes `--apply`. Validates that every category exists in the
+   * `categories` table before accepting.
+   */
+  propose_budgets: (input: {
+    budgets: Array<{ category: string; monthly_amount: number; rationale?: string }>;
+  }) => { accepted: BudgetProposal[]; rejected: Array<{ category: string; reason: string }> };
 }
 
 export interface RunAskOptions {
@@ -103,7 +130,8 @@ export const SYSTEM_PROMPT = [
   'The user owns the underlying SQLite database; every tool call is local and read-only.',
   'Prefer the high-level helpers (get_category_summary, get_recurring_payments, get_account_list) when they fit the question.',
   'Use query_transactions for ad-hoc SQL only when the helpers cannot express the request; the database enforces SELECT-only safety.',
-  'Schema (SQLite, snake_case): transactions(id, account_id, timestamp INTEGER seconds, amount REAL signed, currency, description, merchant_name, category, category_source, transaction_type, is_pending). accounts(id, display_name, currency, balance_current, balance_updated_at). Negative amounts are outflows.',
+  'When the user asks you to create, suggest, or set up budgets, call propose_budgets with one entry per category. The CLI collects proposals and either prints paste-ready commands or applies them when the user passes --apply. Categories must already exist in the categories table; unknown ones will be rejected. Always include a one-line rationale per budget.',
+  'Schema (SQLite, snake_case): transactions(id, account_id, timestamp INTEGER seconds, amount REAL signed, currency, description, merchant_name, category, category_source, transaction_type, is_pending). accounts(id, display_name, currency, balance_current, balance_updated_at). categories(name, parent, color, icon). Negative amounts are outflows.',
   'Quote currency amounts with the relevant currency symbol (£ for GBP). Be concise; prefer numbers and short summaries to long prose.',
   'If a question is ambiguous, state your assumption briefly and answer based on it rather than refusing.',
 ].join(' ');
@@ -126,12 +154,18 @@ export async function* runAsk(opts: RunAskOptions): AsyncIterable<AskEvent> {
   // assistant `tool_use` plus its corresponding `tool_result` user block.
   const messages: ClaudeMessage[] = [{ role: 'user', content: opts.question }];
 
+  // Accumulate budget proposals across the loop. The propose_budgets tool
+  // returns immediately to Claude with accept/reject feedback, but the
+  // accepted entries are also pushed here so the CLI can render them in
+  // the `done` event.
+  const proposals: BudgetProposal[] = [];
+
   let iterations = 0;
   let lastStopReason: ClaudeMessageResponse['stop_reason'] = null;
 
   while (iterations < maxIterations) {
     if (opts.abortSignal?.aborted) {
-      yield { type: 'done', stopReason: 'stop_sequence', iterations };
+      yield { type: 'done', stopReason: 'stop_sequence', iterations, proposals };
       return;
     }
     iterations += 1;
@@ -196,8 +230,11 @@ export async function* runAsk(opts: RunAskOptions): AsyncIterable<AskEvent> {
     const toolResults: ClaudeContentBlock[] = [];
     for (const block of toolUseBlocks) {
       yield { type: 'tool_call', name: block.name, input: block.input };
-      const { ok, summary, content } = await invokeTool(block.name, block.input, tools);
+      const { ok, summary, content, accepted } = await invokeTool(block.name, block.input, tools);
       yield { type: 'tool_result', name: block.name, ok, summary };
+      if (accepted && accepted.length > 0) {
+        proposals.push(...accepted);
+      }
       toolResults.push({
         type: 'tool_result',
         tool_use_id: block.id,
@@ -211,12 +248,12 @@ export async function* runAsk(opts: RunAskOptions): AsyncIterable<AskEvent> {
     messages.push({ role: 'user', content: toolResults });
 
     if (opts.abortSignal?.aborted) {
-      yield { type: 'done', stopReason: 'stop_sequence', iterations };
+      yield { type: 'done', stopReason: 'stop_sequence', iterations, proposals };
       return;
     }
   }
 
-  yield { type: 'done', stopReason: lastStopReason, iterations };
+  yield { type: 'done', stopReason: lastStopReason, iterations, proposals };
 }
 
 /** Build the four tool definitions advertised to Claude (PRD §8.2). */
@@ -272,6 +309,44 @@ export function buildToolDefs(): ClaudeTool[] {
       description: 'List all accounts with current balances.',
       input_schema: { type: 'object', properties: {} },
     },
+    {
+      name: 'propose_budgets',
+      description:
+        'Propose monthly budgets per category. Does not write to the database — the CLI ' +
+        'collects accepted proposals and either prints paste-ready `ferret budget set` ' +
+        'commands or applies them when the user passes `--apply`. Each entry must reference ' +
+        'an existing category from the categories table; unknown categories are rejected ' +
+        'and returned in the response so you can adjust and re-propose. Always include a ' +
+        'one-line rationale per budget.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          budgets: {
+            type: 'array',
+            description: 'One entry per category to budget for.',
+            items: {
+              type: 'object',
+              properties: {
+                category: {
+                  type: 'string',
+                  description: 'Category name (must match the categories table).',
+                },
+                monthly_amount: {
+                  type: 'number',
+                  description: 'Positive monthly cap in the user default currency.',
+                },
+                rationale: {
+                  type: 'string',
+                  description: 'One-line justification for the chosen amount.',
+                },
+              },
+              required: ['category', 'monthly_amount'],
+            },
+          },
+        },
+        required: ['budgets'],
+      },
+    },
   ];
 }
 
@@ -292,7 +367,55 @@ function bindDefaultTools(overrides?: Partial<AskTools>): AskTools {
       overrides?.get_recurring_payments ??
       ((input) => detectRecurringPayments({ minOccurrences: input.min_occurrences })),
     get_account_list: overrides?.get_account_list ?? (() => getAccountList()),
+    propose_budgets: overrides?.propose_budgets ?? defaultProposeBudgets,
   };
+}
+
+/**
+ * Default `propose_budgets` handler. Validates each entry against the
+ * `categories` table and a positive-amount check. Does NOT write to the
+ * `budgets` table — accepted proposals are returned for the orchestrator
+ * to surface in the `done` event. The CLI is responsible for applying
+ * them via `setBudget()` after explicit user confirmation (or `--apply`).
+ */
+function defaultProposeBudgets(input: {
+  budgets: Array<{ category: string; monthly_amount: number; rationale?: string }>;
+}): { accepted: BudgetProposal[]; rejected: Array<{ category: string; reason: string }> } {
+  const accepted: BudgetProposal[] = [];
+  const rejected: Array<{ category: string; reason: string }> = [];
+  if (!Array.isArray(input?.budgets) || input.budgets.length === 0) {
+    return { accepted, rejected };
+  }
+  const currency = defaultCurrency();
+  const { db } = getDb();
+  for (const entry of input.budgets) {
+    const cat = String(entry?.category ?? '').trim();
+    const amount = Number(entry?.monthly_amount);
+    if (!cat) {
+      rejected.push({ category: cat, reason: 'category is required' });
+      continue;
+    }
+    if (!Number.isFinite(amount) || amount <= 0) {
+      rejected.push({ category: cat, reason: `monthly_amount must be positive, got ${amount}` });
+      continue;
+    }
+    const exists = db
+      .select({ name: categories.name })
+      .from(categories)
+      .where(eq(categories.name, cat))
+      .all();
+    if (exists.length === 0) {
+      rejected.push({ category: cat, reason: 'unknown category' });
+      continue;
+    }
+    accepted.push({
+      category: cat,
+      monthlyAmount: amount,
+      currency,
+      rationale: entry.rationale ? String(entry.rationale).trim() : undefined,
+    });
+  }
+  return { accepted, rejected };
 }
 
 interface ToolInvocationResult {
@@ -301,6 +424,8 @@ interface ToolInvocationResult {
   summary: string;
   /** Wire-format content for the tool_result block fed back to Claude. */
   content: string;
+  /** Only set by `propose_budgets` — proposals the orchestrator should accumulate. */
+  accepted?: BudgetProposal[];
 }
 
 async function invokeTool(
@@ -348,6 +473,34 @@ async function invokeTool(
           ok: true,
           summary: `get_account_list -> ${rows.length} accounts`,
           content: JSON.stringify({ rows }),
+        };
+      }
+      case 'propose_budgets': {
+        const arr = readArrayMaybe(input, 'budgets') ?? [];
+        const result = tools.propose_budgets({
+          budgets: arr.map((e) => {
+            const obj = (e ?? {}) as Record<string, unknown>;
+            return {
+              category: String(obj.category ?? ''),
+              monthly_amount: Number(obj.monthly_amount ?? Number.NaN),
+              rationale: typeof obj.rationale === 'string' ? obj.rationale : undefined,
+            };
+          }),
+        });
+        return {
+          ok: true,
+          summary: `propose_budgets -> ${result.accepted.length} accepted, ${result.rejected.length} rejected`,
+          // Echo accepts + rejects back to Claude so it can adjust if needed
+          // (e.g. fix a typo'd category name and re-propose).
+          content: JSON.stringify({
+            accepted: result.accepted.map((p) => ({
+              category: p.category,
+              monthly_amount: p.monthlyAmount,
+              currency: p.currency,
+            })),
+            rejected: result.rejected,
+          }),
+          accepted: result.accepted,
         };
       }
       default:
