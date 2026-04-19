@@ -698,7 +698,7 @@ ferret
      response_type=code
      &client_id={CLIENT_ID}
      &redirect_uri=http://localhost:{PORT}/callback
-     &scope=info accounts balance transactions offline_access
+     &scope=info accounts balance cards transactions offline_access
      &providers=uk-oauth-all
      &state={STATE}
 5. User authenticates at bank, is redirected to localhost:PORT/callback?code=X&state=Y
