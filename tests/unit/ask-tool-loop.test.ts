@@ -124,6 +124,7 @@ describe('runAsk — happy path', () => {
       'get_account_list',
       'get_category_summary',
       'get_recurring_payments',
+      'propose_budgets',
       'query_transactions',
     ]);
     expect(calls[0]?.max_tokens).toBe(1024);
@@ -497,18 +498,133 @@ describe('runAsk — tool result truncation', () => {
   });
 });
 
+describe('runAsk — propose_budgets', () => {
+  test('accumulates accepted proposals and surfaces them on the done event', async () => {
+    const { client } = scriptedClient([
+      {
+        id: 'm1',
+        type: 'message',
+        role: 'assistant',
+        model: 'claude-opus-4-7',
+        content: [
+          {
+            type: 'tool_use',
+            id: 'tool_1',
+            name: 'propose_budgets',
+            input: {
+              budgets: [
+                { category: 'Groceries', monthly_amount: 350, rationale: 'avg 320 last 3mo' },
+                { category: 'Eating Out', monthly_amount: 200 },
+              ],
+            },
+          },
+        ],
+        stop_reason: 'tool_use',
+        stop_sequence: null,
+      },
+      {
+        id: 'm2',
+        type: 'message',
+        role: 'assistant',
+        model: 'claude-opus-4-7',
+        content: [{ type: 'text', text: 'I proposed two budgets.' }],
+        stop_reason: 'end_turn',
+        stop_sequence: null,
+      },
+    ]);
+    const events = await collect(
+      runAsk({
+        question: 'help me budget',
+        claudeClient: client,
+        tools: {
+          propose_budgets: ({ budgets }) => ({
+            accepted: budgets.map((b) => ({
+              category: b.category,
+              monthlyAmount: b.monthly_amount,
+              currency: 'GBP',
+              rationale: b.rationale,
+            })),
+            rejected: [],
+          }),
+        },
+      }),
+    );
+    const done = events.find((e) => e.type === 'done');
+    expect(done?.type).toBe('done');
+    if (done?.type !== 'done') throw new Error('expected done event');
+    expect(done.proposals?.length).toBe(2);
+    expect(done.proposals?.[0]?.category).toBe('Groceries');
+    expect(done.proposals?.[0]?.monthlyAmount).toBe(350);
+    expect(done.proposals?.[0]?.rationale).toBe('avg 320 last 3mo');
+    expect(done.proposals?.[1]?.category).toBe('Eating Out');
+  });
+
+  test('feeds rejected proposals back to Claude so it can adjust', async () => {
+    const { client, calls } = scriptedClient([
+      {
+        id: 'm1',
+        type: 'message',
+        role: 'assistant',
+        model: 'claude-opus-4-7',
+        content: [
+          {
+            type: 'tool_use',
+            id: 'tool_1',
+            name: 'propose_budgets',
+            input: { budgets: [{ category: 'Vacations', monthly_amount: 500 }] },
+          },
+        ],
+        stop_reason: 'tool_use',
+        stop_sequence: null,
+      },
+      {
+        id: 'm2',
+        type: 'message',
+        role: 'assistant',
+        model: 'claude-opus-4-7',
+        content: [{ type: 'text', text: 'noted' }],
+        stop_reason: 'end_turn',
+        stop_sequence: null,
+      },
+    ]);
+    await collect(
+      runAsk({
+        question: 'budget for vacations',
+        claudeClient: client,
+        tools: {
+          propose_budgets: () => ({
+            accepted: [],
+            rejected: [{ category: 'Vacations', reason: 'unknown category' }],
+          }),
+        },
+      }),
+    );
+    // The second call's last user message should contain the tool_result with
+    // the rejection payload so Claude can re-propose against a real category.
+    const secondCall = calls[1];
+    const lastMsg = secondCall?.messages[secondCall.messages.length - 1];
+    expect(lastMsg?.role).toBe('user');
+    const content = JSON.stringify(lastMsg?.content);
+    expect(content).toContain('rejected');
+    expect(content).toContain('unknown category');
+  });
+});
+
 describe('buildToolDefs', () => {
-  test('exposes the four PRD §8.2 tools with the expected schemas', () => {
+  test('exposes the PRD §8.2 read tools plus propose_budgets', () => {
     const defs = buildToolDefs();
     expect(defs.map((d) => d.name).sort()).toEqual([
       'get_account_list',
       'get_category_summary',
       'get_recurring_payments',
+      'propose_budgets',
       'query_transactions',
     ]);
     const sumDef = defs.find((d) => d.name === 'get_category_summary');
     expect(sumDef?.input_schema.required).toEqual(['from', 'to']);
     const queryDef = defs.find((d) => d.name === 'query_transactions');
     expect(queryDef?.input_schema.required).toEqual(['sql']);
+    const proposeDef = defs.find((d) => d.name === 'propose_budgets');
+    expect(proposeDef?.input_schema.required).toEqual(['budgets']);
   });
 });
