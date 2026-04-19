@@ -35,9 +35,6 @@ export default defineCommand({
 
     const { db } = getDb();
     const existing = db.select().from(connections).where(eq(connections.id, connectionId)).all();
-    if (existing.length === 0) {
-      throw new ValidationError(`No connection with id "${connectionId}".`);
-    }
     const conn = existing[0];
     if (!conn) {
       throw new ValidationError(`No connection with id "${connectionId}".`);
