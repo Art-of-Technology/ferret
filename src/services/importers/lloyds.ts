@@ -9,6 +9,7 @@
 
 import { ValidationError } from '../../lib/errors';
 import { type ParsedTransaction, parseCsv } from './index';
+import { parseFloatSafe, parseUkDate } from './uk-date';
 
 const HEADER_INDEXES = {
   date: 0,
@@ -51,9 +52,9 @@ export function parseLloyds(raw: string): ParsedTransaction[] {
 
     if (!dateStr) continue;
 
-    const date = parseUkDate(dateStr);
-    const debit = parseFloatSafe(debitStr);
-    const credit = parseFloatSafe(creditStr);
+    const date = parseUkDate(dateStr, 'Lloyds');
+    const debit = parseFloatSafe(debitStr, 'Lloyds', i + 1);
+    const credit = parseFloatSafe(creditStr, 'Lloyds', i + 1);
 
     let amount = 0;
     if (debit > 0) amount = -debit;
@@ -68,24 +69,4 @@ export function parseLloyds(raw: string): ParsedTransaction[] {
     });
   }
   return out;
-}
-
-function parseUkDate(s: string): Date {
-  // dd/MM/yyyy
-  const m = /^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/.exec(s);
-  if (!m) throw new ValidationError(`Lloyds parser: invalid date '${s}'`);
-  const day = Number.parseInt(m[1] as string, 10);
-  const month = Number.parseInt(m[2] as string, 10);
-  let year = Number.parseInt(m[3] as string, 10);
-  if (year < 100) year += 2000;
-  // Construct as UTC midnight to avoid timezone drift.
-  return new Date(Date.UTC(year, month - 1, day));
-}
-
-function parseFloatSafe(s: string): number {
-  if (!s) return 0;
-  const cleaned = s.replace(/[£,]/g, '').trim();
-  if (!cleaned) return 0;
-  const n = Number.parseFloat(cleaned);
-  return Number.isFinite(n) ? n : 0;
 }
