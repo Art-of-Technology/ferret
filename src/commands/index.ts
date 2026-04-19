@@ -18,6 +18,7 @@ import importCmd from './import';
 import init from './init';
 import link from './link';
 import ls from './ls';
+import purge from './purge';
 import remove from './remove';
 import rules from './rules';
 import sync from './sync';
@@ -39,6 +40,7 @@ export const subCommands: Record<string, CommandDef<any>> = {
   init,
   link,
   ls,
+  purge,
   remove,
   rules,
   sync,

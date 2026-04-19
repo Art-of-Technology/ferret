@@ -84,6 +84,22 @@ export async function deleteAllForConnection(connectionId: string): Promise<numb
   return deleted;
 }
 
+/**
+ * Removes every keychain entry stored under the `ferret` service — tokens,
+ * client secrets, API keys, everything. Returns the number of entries deleted.
+ * Used by `ferret purge` to fulfil the §9.1 right-to-erase requirement.
+ */
+export async function purgeAllKeychainEntries(): Promise<number> {
+  const b = await getBackend();
+  const all = await b.findCredentials(SERVICE);
+  let deleted = 0;
+  for (const cred of all) {
+    const ok = await b.deletePassword(SERVICE, cred.account);
+    if (ok) deleted += 1;
+  }
+  return deleted;
+}
+
 // Helpers to construct canonical account names.
 export const accountNames = {
   access: (connectionId: string): string => `truelayer:${connectionId}:access`,
