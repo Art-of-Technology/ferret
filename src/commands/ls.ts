@@ -73,11 +73,15 @@ export default defineCommand({
     const rows = listTransactions(filters);
 
     if (args.json) {
+      // formatJson([]) emits `[]`, which is the correct empty payload.
       process.stdout.write(`${formatJson(rows.map(toSerializable))}\n`);
       return;
     }
     if (args.csv) {
-      process.stdout.write(`${formatCsv(rows.map(toSerializable))}\n`);
+      // For CSV, an empty row set should still emit the header line so
+      // downstream tools can detect the columns.
+      const csv = rows.length === 0 ? CSV_HEADER : formatCsv(rows.map(toSerializable));
+      process.stdout.write(`${csv}\n`);
       return;
     }
 
@@ -113,8 +117,10 @@ function parseAmount(flag: string, raw: string): number {
 }
 
 function parseLimit(raw: string): number {
-  const n = Number.parseInt(raw, 10);
-  if (!Number.isFinite(n) || n <= 0) {
+  // `Number.parseInt('3.9', 10)` would silently truncate to 3, so we route
+  // through `Number()` first and require an integer result.
+  const n = Number(raw);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n <= 0) {
     throw new ValidationError(`--limit must be a positive integer, got "${raw}"`);
   }
   return n;
@@ -144,8 +150,26 @@ function formatAmountForRow(amount: number, currency: string): string {
 }
 
 function toSerializable(row: TransactionRow): Record<string, unknown> {
+  // `TransactionRow.timestamp` is typed as `Date`, so a defensive
+  // `instanceof Date` branch was previously dead code.
   return {
     ...row,
-    timestamp: row.timestamp instanceof Date ? row.timestamp.toISOString() : row.timestamp,
+    timestamp: row.timestamp.toISOString(),
   };
 }
+
+// Pre-computed CSV header line that mirrors the field order produced by
+// `toSerializable`. Used when there are no rows to render so the output is
+// still a valid CSV with the expected column set.
+const CSV_HEADER = [
+  'id',
+  'accountId',
+  'accountName',
+  'timestamp',
+  'amount',
+  'currency',
+  'description',
+  'merchantName',
+  'category',
+  'transactionType',
+].join(',');
