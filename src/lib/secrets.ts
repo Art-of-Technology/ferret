@@ -36,11 +36,30 @@ export const ANTHROPIC_API_KEY: SecretLookup = {
 };
 
 /**
+ * Reads from the keychain, distinguishing a "miss" (returns null) from an
+ * actual backend error (perm denied, daemon unavailable, native binding
+ * missing). Misses fall through to the env-var path; real errors are
+ * re-thrown as ConfigError so the user sees the underlying cause.
+ */
+async function readFromKeychain(spec: SecretLookup): Promise<string | null> {
+  try {
+    return await getToken(spec.keychainAccount);
+  } catch (err) {
+    // ConfigError already carries enough context; rethrow as-is.
+    if (err instanceof ConfigError) throw err;
+    throw new ConfigError(
+      `Failed to read ${spec.label} from keychain account "${spec.keychainAccount}": ${(err as Error).message}`,
+    );
+  }
+}
+
+/**
  * Resolves a secret. Tries the keychain first; on miss, falls back to the env var.
- * Throws ConfigError if neither source has the value.
+ * Throws ConfigError if neither source has the value, or if the keychain read
+ * itself failed (rather than silently masking the failure as a miss).
  */
 export async function resolveSecret(spec: SecretLookup): Promise<string> {
-  const fromKeychain = await getToken(spec.keychainAccount).catch(() => null);
+  const fromKeychain = await readFromKeychain(spec);
   if (fromKeychain && fromKeychain.length > 0) return fromKeychain;
 
   const fromEnv = process.env[spec.envVar];
@@ -53,7 +72,7 @@ export async function resolveSecret(spec: SecretLookup): Promise<string> {
 
 /** Optional variant: returns null if neither source has the value (no throw). */
 export async function tryResolveSecret(spec: SecretLookup): Promise<string | null> {
-  const fromKeychain = await getToken(spec.keychainAccount).catch(() => null);
+  const fromKeychain = await readFromKeychain(spec);
   if (fromKeychain && fromKeychain.length > 0) return fromKeychain;
   const fromEnv = process.env[spec.envVar];
   if (fromEnv && fromEnv.length > 0) return fromEnv;
