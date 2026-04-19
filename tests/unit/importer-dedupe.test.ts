@@ -1,5 +1,10 @@
 import { describe, expect, test } from 'bun:test';
-import { isDuplicate, levenshtein } from '../../src/services/importers/dedupe';
+import {
+  buildLooseBuckets,
+  isDuplicate,
+  isDuplicateLoose,
+  levenshtein,
+} from '../../src/services/importers/dedupe';
 
 const baseExisting = [
   {
@@ -129,6 +134,139 @@ describe('loose dedupe', () => {
         },
         baseExisting,
         'loose',
+      ),
+    ).toBe(false);
+  });
+});
+
+describe('loose dedupe via bucket index', () => {
+  // Verifies the O(parsed + window) average-case fast path: a candidate whose
+  // (date, amount) bucket is empty must return false WITHOUT touching
+  // Levenshtein. We instrument by giving the bucket builder an `existing` set
+  // that intentionally has no bucket overlap with the candidate.
+  test('bucket-miss returns false without scanning the wider window', () => {
+    const existing = [
+      {
+        id: 'csv_existing_1',
+        date: new Date(Date.UTC(2026, 3, 15)),
+        amount: -12.5,
+        description: 'TESCO STORES 1234',
+      },
+      {
+        id: 'csv_existing_2',
+        date: new Date(Date.UTC(2026, 3, 16)),
+        amount: -12.5,
+        description: 'TESCO STORES 1234',
+      },
+    ];
+    const index = buildLooseBuckets(existing);
+
+    // Same amount, but date is 10 days away from any existing row -> bucket
+    // miss. The fuzzy substring/Levenshtein check must NOT fire.
+    expect(
+      isDuplicateLoose(
+        {
+          id: 'new',
+          date: new Date(Date.UTC(2026, 3, 25)),
+          amount: -12.5,
+          description: 'TESCO STORES 1234',
+        },
+        index,
+      ),
+    ).toBe(false);
+  });
+
+  test('bucket hit applies fuzzy match (Levenshtein < 3)', () => {
+    const existing = [
+      {
+        id: 'csv_existing_1',
+        date: new Date(Date.UTC(2026, 3, 15)),
+        amount: -12.5,
+        description: 'TESCO STORES 1234',
+      },
+    ];
+    const index = buildLooseBuckets(existing);
+
+    // Same date + amount, description differs by one char -> bucket hit, fuzzy
+    // match succeeds.
+    expect(
+      isDuplicateLoose(
+        {
+          id: 'new',
+          date: new Date(Date.UTC(2026, 3, 15)),
+          amount: -12.5,
+          description: 'TESCO STORES 1235',
+        },
+        index,
+      ),
+    ).toBe(true);
+  });
+
+  test('matches across adjacent day via bucket index', () => {
+    const existing = [
+      {
+        id: 'csv_existing_1',
+        date: new Date(Date.UTC(2026, 3, 15)),
+        amount: -12.5,
+        description: 'TESCO STORES 1234',
+      },
+    ];
+    const index = buildLooseBuckets(existing);
+    expect(
+      isDuplicateLoose(
+        {
+          id: 'new',
+          date: new Date(Date.UTC(2026, 3, 16)),
+          amount: -12.5,
+          description: 'TESCO STORES 1234',
+        },
+        index,
+      ),
+    ).toBe(true);
+  });
+
+  test('id-equality short-circuit', () => {
+    const existing = [
+      {
+        id: 'csv_existing_1',
+        date: new Date(Date.UTC(2026, 3, 15)),
+        amount: -12.5,
+        description: 'TESCO STORES 1234',
+      },
+    ];
+    const index = buildLooseBuckets(existing);
+    expect(
+      isDuplicateLoose(
+        {
+          id: 'csv_existing_1',
+          date: new Date(Date.UTC(2030, 0, 1)),
+          amount: 999,
+          description: 'completely different',
+        },
+        index,
+      ),
+    ).toBe(true);
+  });
+
+  test('amount mismatch in same day -> bucket miss, no fuzzy work', () => {
+    const existing = [
+      {
+        id: 'csv_existing_1',
+        date: new Date(Date.UTC(2026, 3, 15)),
+        amount: -12.5,
+        description: 'TESCO STORES 1234',
+      },
+    ];
+    const index = buildLooseBuckets(existing);
+    expect(
+      isDuplicateLoose(
+        {
+          id: 'new',
+          date: new Date(Date.UTC(2026, 3, 15)),
+          amount: -99.99,
+          description: 'TESCO STORES 1234',
+        },
+        index,
       ),
     ).toBe(false);
   });

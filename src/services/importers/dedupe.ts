@@ -9,9 +9,16 @@
 //
 // Performance note: the orchestrator narrows the candidate set to a date
 // window before calling these helpers, so `existing` here is already small
-// (typically a few dozen rows, not the whole account history). The strict
-// path additionally short-circuits via id-equality and a (date,amount,desc)
-// hash index built once per import — see `buildStrictIndex` below.
+// (typically a few dozen rows, not the whole account history). Both modes
+// additionally use a pre-built hash index to avoid the O(parsed × window)
+// inner scan:
+//   - strict: key = (date, amount, normalized desc) — exact O(1) lookup, see
+//     `buildStrictIndex` / `isDuplicateStrict`.
+//   - loose:  key = (date, amount) — bucket lookup with the (small) bucket
+//     scanned for substring/Levenshtein, see `buildLooseBuckets` /
+//     `isDuplicateLoose`. Average case O(parsed + window); worst case still
+//     O(parsed × window) but only when every existing row shares the same
+//     (date, amount), which is vanishingly unlikely in real bank data.
 
 export interface DedupeCandidate {
   id: string;
@@ -91,6 +98,69 @@ export function isDuplicate(
 export function isDuplicateStrict(candidate: DedupeCandidate, index: StrictDedupeIndex): boolean {
   if (index.ids.has(candidate.id)) return true;
   return index.keys.has(strictKey(candidate.date, candidate.amount, candidate.description));
+}
+
+/**
+ * Bucket key for loose-mode dedupe: (yyyy-MM-dd, amount-rounded). Description
+ * is intentionally excluded — loose mode allows substring / small-edit
+ * differences in description, so we hash on the parts that must match
+ * exactly and scan within the (typically tiny) bucket.
+ */
+function looseBucketKey(date: Date, amount: number): string {
+  const iso = date.toISOString().slice(0, 10);
+  const cents = Math.round(amount * 100);
+  return `${iso}|${cents}`;
+}
+
+/**
+ * Pre-built bucket index for loose-mode dedupe. Build once per import batch.
+ *
+ * Average case: O(parsed + window) total across all rows, since each candidate
+ * looks up a bucket in O(1) and most buckets contain 0–3 entries. The id set
+ * powers the same id-equality short-circuit as the strict path.
+ */
+export interface LooseDedupeIndex {
+  ids: Set<string>;
+  buckets: Map<string, ExistingTxn[]>;
+}
+
+// O(parsed + window) average: O(window) to build buckets once, O(1) lookup +
+// O(bucket size) scan per parsed row. See module header for full reasoning.
+export function buildLooseBuckets(existing: readonly ExistingTxn[]): LooseDedupeIndex {
+  const ids = new Set<string>();
+  const buckets = new Map<string, ExistingTxn[]>();
+  for (const ex of existing) {
+    ids.add(ex.id);
+    // Loose mode tolerates ±1 day, so index the row under its own day AND the
+    // adjacent days. This keeps lookup a single O(1) hit per candidate.
+    const dayMs = ex.date.getTime();
+    for (const offset of [-ONE_DAY_MS, 0, ONE_DAY_MS] as const) {
+      const key = looseBucketKey(new Date(dayMs + offset), ex.amount);
+      let bucket = buckets.get(key);
+      if (!bucket) {
+        bucket = [];
+        buckets.set(key, bucket);
+      }
+      bucket.push(ex);
+    }
+  }
+  return { ids, buckets };
+}
+
+/**
+ * Loose-mode dedupe via pre-built bucket index. Average O(1) per call (plus
+ * a small constant for the in-bucket fuzzy check).
+ */
+export function isDuplicateLoose(candidate: DedupeCandidate, index: LooseDedupeIndex): boolean {
+  if (index.ids.has(candidate.id)) return true;
+  const bucket = index.buckets.get(looseBucketKey(candidate.date, candidate.amount));
+  if (!bucket) return false;
+  // Bucket already filtered to (same day ± 1, same rounded amount). The
+  // remaining work is the description fuzzy match, scoped to a handful of rows.
+  for (const ex of bucket) {
+    if (looseEquals(ex, candidate)) return true;
+  }
+  return false;
 }
 
 function strictEquals(a: ExistingTxn, b: DedupeCandidate): boolean {
