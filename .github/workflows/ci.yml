@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+    branches:
+      - main
+
+# Cancel in-progress runs for the same ref so PRs only ever reflect the latest push.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    # Fail-fast across the matrix: if macOS goes red, kill Linux too. macOS is
+    # the primary target per PRD section 11.4, so we list it first for clarity.
+    strategy:
+      fail-fast: true
+      matrix:
+        os:
+          - macos-latest
+          - ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          # Pinned per PRD section 11.4 ("Minimum Bun version: 1.1.x").
+          # Update this when bumping the engines.bun field in package.json.
+          bun-version: 1.1.42
+
+      - name: Cache Bun install
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Lint and format check (biome)
+        run: bun run check
+
+      - name: Type check (tsc --noEmit)
+        run: bunx tsc --noEmit
+
+      - name: Test (bun test)
+        run: bun test
+
+      - name: Bench (perf NFRs)
+        # Asserts the PRD section 11.1 targets (ls < 200ms at 100k rows etc).
+        # Non-zero exit fails the job so a regression blocks merge.
+        run: bun run scripts/bench-db.ts
