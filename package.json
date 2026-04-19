@@ -1,0 +1,37 @@
+{
+  "name": "ferret",
+  "version": "0.1.0",
+  "description": "Personal finance CLI for UK banking via TrueLayer",
+  "type": "module",
+  "bin": {
+    "ferret": "src/cli.ts"
+  },
+  "scripts": {
+    "dev": "bun run src/cli.ts",
+    "start": "bun run src/cli.ts",
+    "check": "biome check .",
+    "format": "biome format --write .",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "bun run src/cli.ts init"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.32.1",
+    "citty": "^0.1.6",
+    "cli-table3": "^0.6.5",
+    "consola": "^3.2.3",
+    "date-fns": "^4.1.0",
+    "drizzle-orm": "^0.36.4",
+    "keytar": "^7.9.0",
+    "picocolors": "^1.1.1"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
+    "@types/bun": "^1.1.14",
+    "drizzle-kit": "^0.28.1"
+  },
+  "engines": {
+    "bun": ">=1.1.0"
+  }
+}
