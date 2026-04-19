@@ -148,15 +148,10 @@ export async function syncAllConnections(
       const errorMessage = err instanceof Error ? err.message : String(err);
       ctx.logger?.error(`[${conn.providerName}] ${errorMessage}`);
       // Connection-level failure (i.e. a throw that escaped syncConnection,
-      // typically an AuthError on /accounts). `syncConnection` itself emits
-      // the `sync.started` event before it can throw, so we only need the
-      // failure half here. Error class, not message, is recorded — messages
-      // may contain URLs or provider-side detail worth keeping out of the
-      // long-lived audit file.
-      appendAuditEvent('sync.failed', {
-        connection_id: conn.id,
-        error_class: err instanceof Error ? err.constructor.name : 'unknown',
-      });
+      // typically an AuthError on /accounts). The authoritative `sync.failed`
+      // audit event is emitted inside `syncConnection`'s own catch so there's
+      // exactly one emit per failed connection, regardless of whether the
+      // failure mode was "all accounts failed" or "threw before terminal".
       const completedAt = now();
       const durationMs = completedAt.getTime() - startedAt.getTime();
       const status: ConnectionSyncResult['status'] = 'failed';
@@ -219,20 +214,48 @@ export async function syncConnection(
   opts: SyncOptions,
   ctx: Required<Pick<SyncContext, 'db' | 'now'>> & SyncContext,
 ): Promise<ConnectionSyncResult> {
-  const startedAt = ctx.now();
-  const db = ctx.db ?? defaultDb;
-  const now = ctx.now;
-  const logger = ctx.logger;
-
-  // Audit boundary: one `sync.started` per connection attempted. The
-  // orchestrator records the matching success/partial/failure below (or
-  // catches a throw at the caller and emits `sync.failed` there). `dry_run`
-  // is part of the shape so we can later tell real syncs apart from
-  // `--dry-run` rehearsals during audits.
+  // Audit boundary: one `sync.started` per connection attempted, and exactly
+  // one terminal event (`sync.completed` or `sync.failed`) regardless of
+  // whether the failure mode is "all accounts failed but we returned" or
+  // "something threw before we reached the terminal block". `dry_run` is
+  // part of the shape so we can later tell real syncs apart from `--dry-run`
+  // rehearsals during audits.
   appendAuditEvent('sync.started', {
     connection_id: conn.id,
     dry_run: Boolean(opts.dryRun),
   });
+
+  try {
+    return await runSyncConnection(conn, client, opts, ctx);
+  } catch (err) {
+    // Single authoritative failure emit for the throw-escapes path. The
+    // orchestrator catches and records the sync log row — audit wise we
+    // just need the event to land before the error bubbles.
+    appendAuditEvent('sync.failed', {
+      connection_id: conn.id,
+      error_class: err instanceof Error ? err.constructor.name : 'unknown',
+    });
+    throw err;
+  }
+}
+
+/**
+ * Inner body of {@link syncConnection} — kept as a private helper so the
+ * outer function can wrap it in a single try/catch that emits exactly one
+ * `sync.failed` event for any throw path. All existing semantics (per-account
+ * isolation, terminal state audit emit, sync log row writes) remain inside
+ * here unchanged.
+ */
+async function runSyncConnection(
+  conn: Connection,
+  client: TrueLayerClient,
+  opts: SyncOptions,
+  ctx: Required<Pick<SyncContext, 'db' | 'now'>> & SyncContext,
+): Promise<ConnectionSyncResult> {
+  const startedAt = ctx.now();
+  const db = ctx.db ?? defaultDb;
+  const now = ctx.now;
+  const logger = ctx.logger;
 
   const config = safeLoadConfig();
   const defaultHistoryDays = clampHistoryDays(
