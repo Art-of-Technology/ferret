@@ -31,8 +31,12 @@ describe('audit log', () => {
   });
 
   afterEach(() => {
+    // `process.env.HOME = undefined` would coerce to the literal string
+    // "undefined" (node's env object stringifies assignments), which is worse
+    // than leaving the real original value alone. Use `Reflect.deleteProperty`
+    // to *un-set* the key when HOME wasn't present before the test.
     if (originalHome === undefined) {
-      process.env.HOME = undefined;
+      Reflect.deleteProperty(process.env, 'HOME');
     } else {
       process.env.HOME = originalHome;
     }
@@ -184,5 +188,49 @@ describe('audit log', () => {
     // failure silently — audit logging is best-effort by design.
     process.env.HOME = '/dev/null/definitely-not-a-dir';
     expect(() => appendAuditEvent('config.changed', { key: 'x' })).not.toThrow();
+  });
+
+  test('sync lifecycle events land with the expected shape', () => {
+    // Direct call-site parity: the sync service emits exactly these three
+    // event types with these field shapes. Keeping the test at the audit-
+    // module boundary (rather than wiring a fake TrueLayer client) avoids
+    // coupling the audit suite to DB fixtures while still guarding the
+    // on-disk JSONL contract that dashboards and `ferret audit` will read.
+    appendAuditEvent('sync.started', {
+      connection_id: 'conn-1',
+      dry_run: false,
+    });
+    appendAuditEvent('sync.completed', {
+      connection_id: 'conn-1',
+      status: 'success',
+      accounts: 2,
+      transactions_added: 14,
+      transactions_updated: 0,
+      duration_ms: 123,
+    });
+    appendAuditEvent('sync.failed', {
+      connection_id: 'conn-2',
+      error_class: 'AuthError',
+    });
+
+    const tail = tailAuditLog(3);
+    expect(tail).toHaveLength(3);
+
+    const [started, completed, failed] = tail;
+    expect(started?.type).toBe('sync.started');
+    expect(started?.connection_id).toBe('conn-1');
+    expect(started?.dry_run).toBe(false);
+
+    expect(completed?.type).toBe('sync.completed');
+    expect(completed?.connection_id).toBe('conn-1');
+    expect(completed?.status).toBe('success');
+    expect(completed?.accounts).toBe(2);
+    expect(completed?.transactions_added).toBe(14);
+    expect(completed?.transactions_updated).toBe(0);
+    expect(typeof completed?.duration_ms).toBe('number');
+
+    expect(failed?.type).toBe('sync.failed');
+    expect(failed?.connection_id).toBe('conn-2');
+    expect(failed?.error_class).toBe('AuthError');
   });
 });
