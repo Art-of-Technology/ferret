@@ -32,9 +32,11 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          # Pinned per PRD section 11.4 ("Minimum Bun version: 1.1.x").
-          # Update this when bumping the engines.bun field in package.json.
-          bun-version: 1.1.42
+          # Bun 1.3.x: text-format bun.lock landed in 1.2; older versions
+          # error with "Unknown lockfile version". Repo lockfile was generated
+          # with 1.3.10. PRD §11.4 names 1.1.x as a minimum but the project
+          # actually requires the newer lockfile parser.
+          bun-version: 1.3.10
 
       - name: Cache Bun install
         uses: actions/cache@v4
