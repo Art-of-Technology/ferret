@@ -17,7 +17,7 @@
 // The orchestrator is deliberately stateless across invocations (PRD
 // §9.4: no persistent conversation between asks).
 
-import { eq } from 'drizzle-orm';
+import { sql } from 'drizzle-orm';
 import { getDb } from '../db/client';
 import {
   type CategorySummaryRow,
@@ -399,17 +399,21 @@ function defaultProposeBudgets(input: {
       rejected.push({ category: cat, reason: `monthly_amount must be positive, got ${amount}` });
       continue;
     }
+    // Case-insensitive lookup so Claude's "groceries" matches the seeded
+    // "Groceries" row. We then accept the *canonical* casing from the DB
+    // so downstream setBudget() and budget views stay consistent.
     const exists = db
       .select({ name: categories.name })
       .from(categories)
-      .where(eq(categories.name, cat))
+      .where(sql`lower(${categories.name}) = lower(${cat})`)
       .all();
-    if (exists.length === 0) {
+    const canonical = exists[0]?.name;
+    if (!canonical) {
       rejected.push({ category: cat, reason: 'unknown category' });
       continue;
     }
     accepted.push({
-      category: cat,
+      category: canonical,
       monthlyAmount: amount,
       currency,
       rationale: entry.rationale ? String(entry.rationale).trim() : undefined,

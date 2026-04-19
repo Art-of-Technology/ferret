@@ -248,7 +248,18 @@ function applyBudgetProposals(proposals: BudgetProposal[]): ApplyResult[] {
         ok: true,
       });
     } catch (err) {
-      const message = err instanceof FerretError ? err.message : (err as Error).message;
+      // Only surface FerretError messages verbatim (those are written for
+      // user consumption). Anything else (raw drizzle / sqlite errors) can
+      // leak file paths, table names, or stack frames into stdout/JSON;
+      // collapse to a generic message and route the detail to consola
+      // for verbose logging.
+      let message: string;
+      if (err instanceof FerretError) {
+        message = err.message;
+      } else {
+        consola.warn(`setBudget("${p.category}") failed:`, err);
+        message = 'failed to set budget (see logs)';
+      }
       out.push({
         category: p.category,
         monthlyAmount: p.monthlyAmount,
@@ -284,10 +295,19 @@ function renderProposals(proposals: BudgetProposal[], apply: boolean): void {
   } else {
     process.stdout.write(picocolors.dim('Run with --apply to write these, or paste:\n'));
     for (const p of proposals) {
-      const cat = p.category.includes(' ') ? `"${p.category}"` : p.category;
-      process.stdout.write(`  ferret budget set ${cat} ${p.monthlyAmount}\n`);
+      process.stdout.write(`  ferret budget set ${shellQuote(p.category)} ${p.monthlyAmount}\n`);
     }
   }
+}
+
+/**
+ * Shell-quote a string for paste-ready POSIX commands. Always wraps in
+ * single quotes (literal — no expansion) and escapes inner single quotes
+ * via the standard `'\''` close-and-reopen trick. Categories like
+ * "Eating Out", "O'Brien's Pub", or anything with a $/`/!/" stay safe.
+ */
+function shellQuote(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
 function formatAmount(n: number, currency: string): string {
