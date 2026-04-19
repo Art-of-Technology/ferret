@@ -22,6 +22,7 @@ const EXPECTED_COMMANDS = [
   'export',
   'config',
   'version',
+  'purge',
 ];
 
 test('ferret --help lists every command from src/commands/', () => {
