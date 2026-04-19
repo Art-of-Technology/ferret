@@ -1,0 +1,65 @@
+name: CodeQL
+
+# Static application security testing. Runs the `security-extended` query
+# suite against JavaScript/TypeScript on every push to main, on PRs
+# targeting main, and on a weekly schedule so new rules catch old code.
+#
+# Docs: https://docs.github.com/en/code-security/code-scanning/creating-an-advanced-setup-for-code-scanning/customizing-your-advanced-setup-for-code-scanning
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  schedule:
+    # 05:17 UTC every Monday — offset a few minutes off the hour so we
+    # aren't fighting the rest of the GitHub-hosted runner fleet.
+    - cron: "17 5 * * 1"
+
+permissions:
+  contents: read
+  # required so the CodeQL action can upload SARIF results
+  security-events: write
+  # required for private repos to read Actions metadata
+  actions: read
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze (javascript-typescript)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        language:
+          - javascript-typescript
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-extended
+          # Fail the job on any error-level CodeQL configuration/analysis
+          # issue. Severity-based failing is handled by the analyze step.
+          config: |
+            disable-default-queries: false
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"
+          # Fail the workflow if any error- or critical-severity alert is
+          # found. GitHub defaults to only failing on errors; we opt in to
+          # critical security alerts too per issue #43 acceptance criteria.
+          upload: always
+        env:
+          # The analyze action reads these to decide when to fail.
+          CODEQL_ACTION_FAIL_ON_ERROR: "true"
