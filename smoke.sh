@@ -12,6 +12,10 @@ cd "$REPO_ROOT"
 TMP_HOME="$(mktemp -d -t ferret-smoke-XXXXXX)"
 export HOME="$TMP_HOME"
 
+# Per-run output buffer — avoids collisions if two smokes run concurrently
+# (e.g. CI matrix). Lives under $TMP_HOME so it's cleaned up with HOME.
+SMOKE_OUT="$TMP_HOME/smoke.out"
+
 # Cleanup on exit (success or failure).
 trap 'rm -rf "$TMP_HOME"' EXIT
 
@@ -28,14 +32,14 @@ FAIL=0
 run() {
   local name="$1"; shift
   printf "${CYAN}▶${RESET} %-50s " "$name"
-  if "$@" > /tmp/ferret-smoke.out 2>&1; then
+  if "$@" > "$SMOKE_OUT" 2>&1; then
     printf "%bOK%b\n" "$GREEN" "$RESET"
     PASS=$((PASS + 1))
   else
     local rc=$?
     printf "%bFAIL%b (exit %d)\n" "$RED" "$RESET" "$rc"
     printf "%b--- output ---%b\n" "$DIM" "$RESET"
-    cat /tmp/ferret-smoke.out
+    cat "$SMOKE_OUT"
     printf "%b--------------%b\n" "$DIM" "$RESET"
     FAIL=$((FAIL + 1))
   fi
@@ -45,12 +49,12 @@ run() {
 run_expect_fail() {
   local name="$1"; shift
   printf "${CYAN}▶${RESET} %-50s " "$name"
-  if ! "$@" > /tmp/ferret-smoke.out 2>&1; then
+  if ! "$@" > "$SMOKE_OUT" 2>&1; then
     printf "%bOK%b %b(expected non-zero)%b\n" "$GREEN" "$RESET" "$DIM" "$RESET"
     PASS=$((PASS + 1))
   else
     printf "%bFAIL%b %b(expected non-zero, got 0)%b\n" "$RED" "$RESET" "$DIM" "$RESET"
-    cat /tmp/ferret-smoke.out
+    cat "$SMOKE_OUT"
     FAIL=$((FAIL + 1))
   fi
 }

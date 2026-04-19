@@ -1,17 +1,12 @@
-// `ferret unlink` — revoke a connection.
+// `ferret unlink` — soft-revoke a single connection.
 //
-// Per the issue + PRD §4.1: by default this is a soft revoke — it removes
-// tokens and marks the connection `revoked`, but leaves `accounts` and
-// `transactions` rows intact so the user's transaction history remains
-// queryable for `ferret ls` / `ferret ask`.
+// Per the issue + PRD §4.1: this removes tokens and marks the connection
+// `revoked`, but leaves `accounts` and `transactions` rows intact so the
+// user's transaction history remains queryable for `ferret ls` /
+// `ferret ask`.
 //
-// Pass `--all` to hard-delete EVERY connection together with its accounts,
-// transactions, sync logs, and keychain tokens — useful for wiping the DB
-// when starting over. See `ferret remove` for the single-id hard-delete.
-//
-// Behaviour:
-//   - `unlink <id>`     → soft revoke (tokens gone, history retained)
-//   - `unlink --all`    → hard delete ALL bank-linked data
+// For hard deletes (single or bulk), use `ferret remove` — see that
+// command for `--all`.
 
 import { defineCommand } from 'citty';
 import consola from 'consola';
@@ -22,49 +17,17 @@ import { ValidationError } from '../lib/errors';
 import { deleteAllForConnection } from '../services/keychain';
 
 export default defineCommand({
-  meta: { name: 'unlink', description: 'Remove a connection and revoke tokens' },
+  meta: { name: 'unlink', description: 'Revoke a connection (keeps transaction history)' },
   args: {
-    connectionId: { type: 'positional', description: 'Connection id', required: false },
-    all: { type: 'boolean', description: 'Hard-delete every connection + its data' },
+    connectionId: { type: 'positional', description: 'Connection id', required: true },
   },
   async run({ args }) {
-    const all = Boolean(args.all);
-    const connectionId = args.connectionId ? String(args.connectionId) : '';
-
-    if (all && connectionId) {
-      throw new ValidationError('Pass either a connection id OR --all, not both.');
-    }
-    if (!all && !connectionId) {
-      throw new ValidationError('Provide a connection id, or use --all.');
+    const connectionId = String(args.connectionId);
+    if (!connectionId) {
+      throw new ValidationError('connection id is required');
     }
 
     const { db } = getDb();
-
-    if (all) {
-      const allConns = db.select({ id: connections.id }).from(connections).all();
-      if (allConns.length === 0) {
-        consola.info('No connections to remove.');
-        return;
-      }
-
-      let keychainRemoved = 0;
-      for (const c of allConns) {
-        keychainRemoved += await deleteAllForConnection(c.id).catch((err) => {
-          consola.warn(`Could not clear keychain for ${c.id}: ${(err as Error).message}`);
-          return 0;
-        });
-      }
-
-      const summary = hardDeleteConnections(
-        db,
-        allConns.map((c) => c.id),
-      );
-      consola.success(
-        `Removed ${summary.connections} connection(s), ${summary.accounts} account(s), ${summary.transactions} transaction(s); cleared ${keychainRemoved} keychain entr${keychainRemoved === 1 ? 'y' : 'ies'}.`,
-      );
-      return;
-    }
-
     const existing = db.select().from(connections).where(eq(connections.id, connectionId)).all();
     const conn = existing[0];
     if (!conn) {

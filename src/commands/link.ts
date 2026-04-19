@@ -183,8 +183,14 @@ export default defineCommand({
     try {
       const cardsResp = await client.getCards();
       cardRows = cardsResp.results;
-    } catch {
-      // Providers without cards return 501 / 403 here; silently ignore.
+    } catch (err) {
+      // 501 = provider has no /cards endpoint; 403 = consent didn't grant the
+      // `cards` scope. Both are expected capability gaps, not failures — stay
+      // silent. Anything else (network, auth, 5xx) is real and worth a warn
+      // so users can see why a card they expected isn't in the discovered list.
+      if (!(err instanceof EndpointNotSupportedError) && !(err instanceof AuthError)) {
+        consola.warn(`Linked successfully but failed to list cards: ${(err as Error).message}`);
+      }
     }
 
     let discovered = 0;
