@@ -11,6 +11,7 @@
 
 import { randomBytes } from 'node:crypto';
 import { platform } from 'node:os';
+import ferretSvgRaw from '../ferret.svg' with { type: 'text' };
 import { AuthError, NetworkError } from '../lib/errors';
 
 export const PORT_MIN = 8000;
@@ -55,17 +56,55 @@ export interface OAuthFlowOptions {
   onListening?: (info: { port: number; redirectUri: string; authUrl: string }) => void;
 }
 
-const SUCCESS_HTML = `<!doctype html><html><head><meta charset="utf-8"><title>ferret: connected</title>
-<style>body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#0a0a0a;color:#eaeaea;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}
-.card{padding:32px 48px;border:1px solid #2a2a2a;border-radius:8px;text-align:center;}
-h1{margin:0 0 8px;font-size:18px;font-weight:500;}p{margin:0;color:#888;font-size:14px;}</style></head>
-<body><div class="card"><h1>ferret connected</h1><p>You can close this tab and return to your terminal.</p></div></body></html>`;
+// Inline the ferret mark so color inherits from the surrounding .logo container.
+const LOGO_SVG = ferretSvgRaw.replace(/fill="black"/g, 'fill="currentColor"');
+
+const SUCCESS_HTML = `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>ferret — connected</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+:root{color-scheme:dark;}
+*{box-sizing:border-box;}
+body{font-family:-apple-system,BlinkMacSystemFont,'Inter',sans-serif;background:radial-gradient(ellipse at top,#161616 0%,#0a0a0a 60%);color:#eaeaea;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:24px;}
+.card{max-width:420px;width:100%;padding:40px 32px;background:#111;border:1px solid #222;border-radius:16px;text-align:center;box-shadow:0 10px 40px rgba(0,0,0,.4);}
+.logo{margin:0 auto 20px;display:flex;align-items:center;justify-content:center;color:#f97316;}
+.logo svg{width:56px;height:auto;filter:drop-shadow(0 4px 12px rgba(249,115,22,.25));}
+.check{display:inline-flex;align-items:center;gap:8px;padding:4px 12px;border-radius:999px;background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.3);color:#4ade80;font-size:12px;font-weight:500;margin-bottom:16px;}
+.check::before{content:'';width:6px;height:6px;border-radius:50%;background:#4ade80;box-shadow:0 0 8px #4ade80;}
+h1{margin:0 0 10px;font-size:22px;font-weight:600;letter-spacing:-.01em;}
+p{margin:0;color:#9a9a9a;font-size:14px;line-height:1.5;}
+.hint{margin-top:20px;font-size:12px;color:#666;}
+</style></head>
+<body><div class="card">
+<div class="logo">${LOGO_SVG}</div>
+<div class="check">connection established</div>
+<h1>Your bank is linked</h1>
+<p>You can close this tab and return to the terminal.</p>
+<div class="hint">ferret · personal finance CLI</div>
+</div>
+<script>setTimeout(()=>{try{window.close();}catch(e){}},2500);</script>
+</body></html>`;
 
 const ERROR_HTML = (msg: string): string =>
-  `<!doctype html><html><head><meta charset="utf-8"><title>ferret: error</title></head>
-<body style="font-family:sans-serif;padding:40px;background:#0a0a0a;color:#eaeaea;">
-<h1 style="font-size:18px;">ferret: ${escapeHtml(msg)}</h1>
-<p style="color:#888;">Return to the terminal for details.</p></body></html>`;
+  `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>ferret — error</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+:root{color-scheme:dark;}
+body{font-family:-apple-system,BlinkMacSystemFont,'Inter',sans-serif;background:radial-gradient(ellipse at top,#161616 0%,#0a0a0a 60%);color:#eaeaea;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:24px;}
+.card{max-width:420px;width:100%;padding:40px 32px;background:#111;border:1px solid #222;border-radius:16px;text-align:center;}
+.logo{margin:0 auto 20px;display:flex;align-items:center;justify-content:center;color:#f97316;}
+.logo svg{width:56px;height:auto;}
+.badge{display:inline-flex;align-items:center;gap:8px;padding:4px 12px;border-radius:999px;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);color:#f87171;font-size:12px;font-weight:500;margin-bottom:16px;}
+h1{margin:0 0 10px;font-size:20px;font-weight:600;}
+p{margin:0;color:#9a9a9a;font-size:14px;line-height:1.5;word-break:break-word;}
+.hint{margin-top:20px;font-size:12px;color:#666;}
+</style></head>
+<body><div class="card">
+<div class="logo">${LOGO_SVG}</div>
+<div class="badge">connection failed</div>
+<h1>Something went wrong</h1>
+<p>${escapeHtml(msg)}</p>
+<div class="hint">Return to the terminal for details.</div>
+</div></body></html>`;
 
 function escapeHtml(s: string): string {
   return s.replace(/[&<>'"`]/g, (c) => `&#${c.charCodeAt(0)};`);
@@ -131,7 +170,9 @@ function startCallbackServer(
           headers: { 'content-type': 'text/html; charset=utf-8' },
         });
       }
-      resolve({ code, state: state as string });
+      // Defer so the success HTML finishes streaming before the caller's
+      // `finally` tears the server down.
+      queueMicrotask(() => resolve({ code, state: state as string }));
       return new Response(SUCCESS_HTML, {
         status: 200,
         headers: { 'content-type': 'text/html; charset=utf-8' },
@@ -172,10 +213,17 @@ export async function runOAuthFlow(
   // collision. We deliberately avoid a probe-then-bind two-step (which has a
   // TOCTOU race: another process can grab the port between probe.stop() and
   // the real bind).
+  // A fixed port lets live TrueLayer apps register a single, stable
+  // redirect URI. Random port fallback is kept for dev / sandbox where
+  // any free port is fine.
+  const fixedPort = process.env.FERRET_OAUTH_PORT
+    ? Number.parseInt(process.env.FERRET_OAUTH_PORT, 10)
+    : null;
+  const maxAttempts = fixedPort ? 1 : MAX_PORT_RETRIES;
   let server: ServerHandle | null = null;
   let lastErr: unknown = null;
-  for (let attempt = 0; attempt < MAX_PORT_RETRIES; attempt++) {
-    const candidate = pickPort();
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const candidate = fixedPort ?? pickPort();
     try {
       server = startCallbackServer(candidate, state, resolveResult, rejectResult);
       break;
@@ -209,6 +257,8 @@ export async function runOAuthFlow(
     const captured = await result;
     return { ...captured, redirectUri, port };
   } finally {
-    server.stop(true);
+    // Graceful stop — lets the success/error response finish streaming so
+    // the browser renders our page instead of ERR_CONNECTION_REFUSED.
+    server.stop(false);
   }
 }
