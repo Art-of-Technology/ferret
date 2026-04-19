@@ -8,7 +8,7 @@
 //   - All bulk writes wrap in `db.transaction` so a partial failure doesn't
 //     leave a half-categorized DB.
 
-import { type SQL, and, asc, desc, eq, inArray, isNull, or, sql } from 'drizzle-orm';
+import { asc, desc, eq, inArray, isNull, or, sql } from 'drizzle-orm';
 import type { BunSQLiteDatabase } from 'drizzle-orm/bun-sqlite';
 import { db as defaultDb } from '../client';
 import { categories, merchantCache, rules, transactions } from '../schema';
@@ -54,9 +54,6 @@ export function listUncategorizedTransactions(db: Db = defaultDb): Uncategorized
  * the full pipeline on these so rule changes propagate everywhere.
  */
 export function listAllNonManualTransactions(db: Db = defaultDb): UncategorizedTxn[] {
-  const conds: SQL[] = [
-    or(isNull(transactions.categorySource), sql`${transactions.categorySource} != 'manual'`) as SQL,
-  ];
   const rows = db
     .select({
       id: transactions.id,
@@ -68,7 +65,7 @@ export function listAllNonManualTransactions(db: Db = defaultDb): UncategorizedT
       timestamp: transactions.timestamp,
     })
     .from(transactions)
-    .where(and(...conds))
+    .where(or(isNull(transactions.categorySource), sql`${transactions.categorySource} != 'manual'`))
     .orderBy(asc(transactions.timestamp))
     .all();
   return rows as UncategorizedTxn[];
@@ -82,7 +79,11 @@ export interface RuleRow {
   priority: number;
 }
 
-/** Highest priority first (DESC); on tie, deterministic by id ASC. */
+/**
+ * Returns rules in canonical apply order: priority DESC, id ASC on tie.
+ * Callers (e.g. `categorizeBatch`) rely on this and do NOT re-sort, so
+ * preserve this contract if you change the query.
+ */
 export function getRules(db: Db = defaultDb): RuleRow[] {
   const rows = db.select().from(rules).orderBy(desc(rules.priority), asc(rules.id)).all();
   return rows.map((r) => ({
@@ -172,23 +173,18 @@ export function applyCategoryAssignments(assignments: TxnAssignment[], db: Db = 
 /**
  * Used by `--retag`: clear category + categorySource on every row whose
  * source was 'cache' or 'claude'. Manual + rule overrides are preserved.
+ *
+ * Uses `.returning({ id })` so the count and the update see the same
+ * snapshot (single statement) — avoids the prior select-then-update race.
  */
 export function clearAutoCategorizations(db: Db = defaultDb): number {
-  // Drizzle's `.returning()` isn't required here; we just count via a
-  // separate select-then-update so the API stays portable.
-  const ids = db
-    .select({ id: transactions.id })
-    .from(transactions)
+  const cleared = db
+    .update(transactions)
+    .set({ category: null, categorySource: null, updatedAt: new Date() })
     .where(inArray(transactions.categorySource, ['cache', 'claude']))
+    .returning({ id: transactions.id })
     .all();
-  if (ids.length === 0) return 0;
-  db.transaction((tx) => {
-    tx.update(transactions)
-      .set({ category: null, categorySource: null, updatedAt: new Date() })
-      .where(inArray(transactions.categorySource, ['cache', 'claude']))
-      .run();
-  });
-  return ids.length;
+  return cleared.length;
 }
 
 export function categoryExists(name: string, db: Db = defaultDb): boolean {
