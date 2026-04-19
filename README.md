@@ -263,6 +263,17 @@ with a pinned Bun version.
 - SQL from Claude is validated as `SELECT`-only before execution
 - No telemetry, no analytics, no phone-home
 
+Compliance and operational docs (part of epic
+[#36](https://github.com/Art-of-Technology/ferret/issues/36) — ISO 27001 /
+SOC 2 technical controls):
+
+- [SECURITY.md](SECURITY.md) — supported versions, private disclosure, scope
+- [PRIVACY.md](PRIVACY.md) — what data Ferret stores and what leaves the machine
+- [THREAT_MODEL.md](THREAT_MODEL.md) — adversaries, assumptions, trust boundaries
+- [docs/incident-response.md](docs/incident-response.md) — runbook for leaked tokens, corrupted DB, lost device
+- [docs/third-parties.md](docs/third-parties.md) — register of external services and credential-rotation steps
+- [CHANGELOG.md](CHANGELOG.md) — release notes and SemVer policy
+
 If you find a security issue, please open a private security advisory rather than a public issue.
 
 ## Limitations
