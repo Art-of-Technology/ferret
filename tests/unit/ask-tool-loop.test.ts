@@ -17,6 +17,8 @@ import type { ClaudeClient } from '../../src/services/claude';
 interface ScriptedClient {
   client: ClaudeClient;
   calls: MessagesCreateRequest[];
+  /** Signal seen on the most recent `messagesCreate` call (if any). */
+  signals: Array<AbortSignal | undefined>;
 }
 
 /**
@@ -24,17 +26,32 @@ interface ScriptedClient {
  * on each `messagesCreate` call. Anything beyond the queue length is
  * `end_turn` with empty text so an over-long loop fails loudly.
  */
-function scriptedClient(responses: ClaudeMessageResponse[]): ScriptedClient {
+function scriptedClient(
+  responses: ClaudeMessageResponse[],
+  hooks: { onCall?: (req: MessagesCreateRequest) => Promise<void> | void } = {},
+): ScriptedClient {
   const calls: MessagesCreateRequest[] = [];
+  const signals: Array<AbortSignal | undefined> = [];
   let i = 0;
   const client = {
     defaultModel: 'claude-opus-4-7',
-    async messagesCreate(req: MessagesCreateRequest): Promise<ClaudeMessageResponse> {
+    async messagesCreate(
+      req: MessagesCreateRequest,
+      callOpts: { signal?: AbortSignal } = {},
+    ): Promise<ClaudeMessageResponse> {
       // Snapshot the messages array at call-time. The orchestrator owns
       // a single `messages` array that it mutates between iterations, so
       // a naive reference-store would let later mutations leak into the
       // earlier `calls[i]` view. Tests assert against per-call history.
       calls.push({ ...req, messages: [...req.messages] });
+      signals.push(callOpts.signal);
+      if (hooks.onCall) await hooks.onCall(req);
+      // Mid-call abort surfaces as an AbortError throw, mirroring fetch.
+      if (callOpts.signal?.aborted) {
+        const err = new Error('aborted');
+        err.name = 'AbortError';
+        throw err;
+      }
       const next = responses[i] ?? {
         id: 'fallback',
         type: 'message',
@@ -48,7 +65,7 @@ function scriptedClient(responses: ClaudeMessageResponse[]): ScriptedClient {
       return next;
     },
   } as unknown as ClaudeClient;
-  return { client, calls };
+  return { client, calls, signals };
 }
 
 async function collect(stream: AsyncIterable<AskEvent>): Promise<AskEvent[]> {
@@ -268,6 +285,58 @@ describe('runAsk — safety caps', () => {
     expect(calls.length).toBe(DEFAULT_MAX_ITERATIONS);
     const done = events.find((e) => e.type === 'done');
     expect(done?.type === 'done' && done.iterations).toBe(DEFAULT_MAX_ITERATIONS);
+  });
+
+  test('forwards the AbortSignal into messagesCreate', async () => {
+    const ac = new AbortController();
+    const { client, signals } = scriptedClient([
+      {
+        id: 'm1',
+        type: 'message',
+        role: 'assistant',
+        model: 'claude-opus-4-7',
+        content: [{ type: 'text', text: 'hi' }],
+        stop_reason: 'end_turn',
+        stop_sequence: null,
+      },
+    ]);
+    await collect(runAsk({ question: 'q', claudeClient: client, abortSignal: ac.signal }));
+    // The loop must thread its abortSignal into every Claude call; without
+    // this propagation a long streaming response can't be cancelled
+    // mid-call (the previous behaviour only checked between iterations).
+    expect(signals[0]).toBe(ac.signal);
+  });
+
+  test('aborts cleanly when the signal trips during a Claude call', async () => {
+    // Simulate a Ctrl-C that arrives while the network call is in flight:
+    // the scripted client checks the signal on entry and throws AbortError
+    // (mirroring fetch), and the loop must yield `done` rather than
+    // surfacing the throw to the caller.
+    const ac = new AbortController();
+    const { client, calls } = scriptedClient(
+      [
+        {
+          id: 'm1',
+          type: 'message',
+          role: 'assistant',
+          model: 'claude-opus-4-7',
+          content: [{ type: 'text', text: 'never' }],
+          stop_reason: 'end_turn',
+          stop_sequence: null,
+        },
+      ],
+      {
+        onCall: () => {
+          ac.abort();
+        },
+      },
+    );
+    const events = await collect(
+      runAsk({ question: 'q', claudeClient: client, abortSignal: ac.signal }),
+    );
+    expect(calls.length).toBe(1);
+    const done = events.find((e) => e.type === 'done');
+    expect(done?.type).toBe('done');
   });
 
   test('honours AbortSignal between iterations', async () => {
