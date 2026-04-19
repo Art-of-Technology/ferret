@@ -12,6 +12,7 @@ import { defineCommand } from 'citty';
 import consola from 'consola';
 import { getDb } from '../db/client';
 import { accounts, connections } from '../db/schema';
+import { appendAuditEvent } from '../lib/audit';
 import { AuthError, DataIntegrityError, ValidationError } from '../lib/errors';
 import { TRUELAYER_CLIENT_ID, TRUELAYER_CLIENT_SECRET, resolveSecret } from '../lib/secrets';
 import { accountNames, setToken } from '../services/keychain';
@@ -241,6 +242,16 @@ export default defineCommand({
         consola.warn(`Skipped card ${c.account_id.slice(0, 8)}…: ${(err as Error).message}`);
       }
     }
+
+    // Audit trail — provider id + connection id are not secrets, and the
+    // discovered-count helps reconcile later sync runs. No tokens or
+    // account numbers are logged.
+    appendAuditEvent('connection.linked', {
+      connection_id: connectionId,
+      provider_id: meResult.provider.provider_id,
+      accounts_discovered: accountRows.length,
+      cards_discovered: cardRows.length,
+    });
 
     consola.success(
       `Connected: ${meResult.provider.display_name} (expires ${connExpiresAt.toISOString().slice(0, 10)})`,

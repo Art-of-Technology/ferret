@@ -1,4 +1,5 @@
 import { defineCommand } from 'citty';
+import { appendAuditEvent } from '../lib/audit';
 import {
   configPath,
   ferretHome,
@@ -44,6 +45,10 @@ export default defineCommand({
         const cfg = loadConfig();
         const next = setConfigValue(cfg, key, value);
         writeConfig(next);
+        // Issue #48 explicitly says "key only, value omitted" — the key
+        // surface is safe (it's documented in the PRD), but arbitrary
+        // user-supplied values could be anything.
+        appendAuditEvent('config.changed', { key });
         process.stdout.write(`set ${key} = ${value}\n`);
       },
     }),

@@ -16,6 +16,7 @@ import { eq } from 'drizzle-orm';
 import { getDb } from '../db/client';
 import { categoryExists, getNextRulePriority, getRules } from '../db/queries/categorize';
 import { rules } from '../db/schema';
+import { appendAuditEvent } from '../lib/audit';
 import { ValidationError } from '../lib/errors';
 import { formatTable } from '../lib/format';
 
@@ -103,6 +104,12 @@ export default defineCommand({
             createdAt: new Date(),
           })
           .run();
+        appendAuditEvent('rule.added', {
+          rule_id: id,
+          field,
+          category,
+          priority,
+        });
         consola.success(
           `added rule ${id} (priority ${priority}): /${pattern}/i on ${field} -> ${category}`,
         );
@@ -121,6 +128,7 @@ export default defineCommand({
           throw new ValidationError(`No rule found with id "${id}".`);
         }
         db.delete(rules).where(eq(rules.id, id)).run();
+        appendAuditEvent('rule.removed', { rule_id: id });
         consola.success(`removed rule ${id}`);
       },
     }),
