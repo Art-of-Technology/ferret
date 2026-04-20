@@ -12,12 +12,12 @@
 // URL and a nudge toward TrueLayer's free developer console, which is where
 // the redirect URI actually has to be registered before `ferret link` works.
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, renameSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { defineCommand } from 'citty';
 import consola from 'consola';
 import { ferretHome } from '../lib/config';
-import { envFilePath, parseEnvFile } from '../lib/env-file';
+import { envFilePath, parseEnvFile, readFileOrEmpty, upsertEnvLine } from '../lib/env-file';
 import { ValidationError } from '../lib/errors';
 import {
   ANTHROPIC_API_KEY,
@@ -26,14 +26,12 @@ import {
   tryResolveSecret,
 } from '../lib/secrets';
 import { setToken } from '../services/keychain';
+// Re-use the live OAuth band so `ferret setup` suggests a port that
+// `ferret link` can actually bind. Importing from a single source keeps
+// the two sides from drifting if the range is ever widened.
+import { PORT_MAX, PORT_MIN } from '../services/oauth';
 
 const TRUELAYER_CONSOLE_URL = 'https://console.truelayer.com/';
-
-// Port range matches the random fallback used in services/oauth.ts so a
-// suggested default will always be in the same band the live app may already
-// have whitelisted.
-const PORT_MIN = 8000;
-const PORT_MAX = 9999;
 
 function isValidPort(n: number): boolean {
   return Number.isInteger(n) && n >= 1 && n <= 65535;
@@ -91,43 +89,21 @@ async function promptRequired(label: string, currentlySet: boolean): Promise<str
   }
 }
 
-function upsertEnvLine(existing: string, key: string, value: string): string {
-  const lines = existing.split(/\r?\n/);
-  let replaced = false;
-  const out: string[] = [];
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) {
-      out.push(line);
-      continue;
-    }
-    const eq = trimmed.indexOf('=');
-    if (eq > 0 && trimmed.slice(0, eq).trim() === key) {
-      if (!replaced) {
-        out.push(`${key}=${value}`);
-        replaced = true;
-      }
-      // Drop duplicate subsequent assignments.
-      continue;
-    }
-    out.push(line);
-  }
-  if (!replaced) {
-    if (out.length > 0 && out[out.length - 1]?.trim() !== '') out.push('');
-    out.push(`${key}=${value}`);
-  }
-  // Ensure trailing newline for POSIX tools.
-  return `${out.join('\n').replace(/\n+$/, '')}\n`;
-}
-
 function writeOauthPort(port: number): string {
   const path = envFilePath();
   const dir = ferretHome();
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
 
-  const existing = existsSync(path) ? readFileSync(path, 'utf-8') : '';
+  const existing = readFileOrEmpty(path);
   const next = upsertEnvLine(existing, 'FERRET_OAUTH_PORT', String(port));
-  writeFileSync(path, next, { mode: 0o600 });
+  // Atomic write: write to a sibling temp file first, then rename. Mirrors
+  // `writeConfig` in src/lib/config.ts — an interrupted write (kill -9,
+  // power loss) leaves the original `.env` intact rather than truncated,
+  // which matters because that file can carry TrueLayer / Anthropic
+  // credentials alongside the port value.
+  const tmp = `${path}.tmp`;
+  writeFileSync(tmp, next, { mode: 0o600 });
+  renameSync(tmp, path);
   return path;
 }
 
@@ -161,12 +137,14 @@ export default defineCommand({
     let portDefault: number;
     if (existingPortEnv && isValidPort(Number.parseInt(existingPortEnv, 10))) {
       portDefault = Number.parseInt(existingPortEnv, 10);
-    } else if (existsSync(envFile)) {
-      const parsed = parseEnvFile(readFileSync(envFile, 'utf-8'));
+    } else {
+      // readFileOrEmpty collapses the previous existsSync + readFileSync
+      // pair into a single syscall, eliminating the TOCTOU race CodeQL
+      // flagged as `js/file-system-race`.
+      const content = readFileOrEmpty(envFile);
+      const parsed = content.length > 0 ? parseEnvFile(content) : {};
       const fromFile = Number.parseInt(parsed.FERRET_OAUTH_PORT ?? '', 10);
       portDefault = isValidPort(fromFile) ? fromFile : await suggestedDefaultPort();
-    } else {
-      portDefault = await suggestedDefaultPort();
     }
 
     const portRaw = (await consola.prompt(
