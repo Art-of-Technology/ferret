@@ -6,23 +6,30 @@
 // the demo on the marketing site instead of unparsed markdown.
 //
 // Styling palette (mirrors the marketing-site mock):
-//   • currency amounts (£/$/€...)    → yellow
+//   • plain prose (not inside any markup)  → gray/dim
+//   • currency amounts (£/$/€...)           → yellow (vivid)
 //   • overspend warnings ("£47 over",
 //     "overspent by £X", "(~18% over)",
-//     bare "Overspent" / "Exceeded")  → red (takes precedence over yellow)
+//     bare "Overspent" / "Exceeded")        → red (takes precedence)
 //   • parentheticals w/o currency
-//     (e.g. "(2 visits)")             → dim
-//   • **bold**, __bold__, headings   → bold
-//   • `inline code`                  → cyan
-//   • `-`/`*` bullets                → `•`
+//     (e.g. "(2 visits)")                   → dim
+//   • **bold**, __bold__, headings          → bold (vivid)
+//   • `inline code`                         → cyan
+//   • `-`/`*` bullets                       → `•`
+//
+// Dimming the prose is done in a final post-processing pass that
+// walks the already-colored output, tracks SGR nesting depth, and
+// wraps depth-0 plain runs in `pc.gray`. That way nested accent
+// spans (yellow, red, bold) keep their vivid styling and the text
+// surrounding them fades to dim without fighting ANSI nesting
+// semantics — close codes don't restore an outer color, so naive
+// `pc.gray(entire-string)` would lose gray inside every accent.
 //
 // Not a full markdown parser: links, images, tables, code fences, and
 // block quotes are passed through unchanged because Claude rarely
 // emits them in ask-mode answers. Warning spans are stashed behind
 // placeholders before the other passes run so yellow currency styling
-// doesn't leak inside the red warning segments (ANSI close codes don't
-// restore a surrounding color, so naive nesting produces half-red
-// spans).
+// doesn't leak inside the red warning segments.
 
 import pc from 'picocolors';
 
@@ -123,5 +130,55 @@ export function renderMarkdown(input: string): string {
   const warnRe = new RegExp(`${SENTINEL}W(\\d+)${SENTINEL}`, 'g');
   out = out.replace(warnRe, (_, i: string) => pc.red(warnings[Number.parseInt(i, 10)] ?? ''));
 
-  return out;
+  // Final pass: dim any plain (non-styled) prose so the output
+  // matches the marketing demo's gray-with-vivid-accents look.
+  return dimPlainRuns(out);
+}
+
+// ANSI SGR close codes picocolors emits — `22` (close bold/dim), `23`
+// (italic), `24` (underline), `29` (strikethrough), `39` (default fg),
+// `49` (default bg). `0` is a full reset and collapses depth to zero
+// regardless of current nesting. Anything else is treated as an
+// opening attribute that increments depth.
+const SGR_CLOSE_CODES = new Set(['22', '23', '24', '29', '39', '49']);
+
+/**
+ * Wrap depth-0 plain-text runs in `pc.gray` so that un-styled prose
+ * renders dim while accent spans (yellow currency, red warnings,
+ * bold headings) keep their vivid styling. Tracks ANSI SGR nesting
+ * depth by scanning each `ESC[…m` escape: close codes decrement,
+ * everything else increments, and a full reset (`ESC[0m`) snaps
+ * depth back to zero. Plain text encountered while depth > 0 is
+ * emitted verbatim because it already inherits the surrounding
+ * style (e.g. the inside of a bold span).
+ */
+function dimPlainRuns(s: string): string {
+  const ansi = new RegExp(`${String.fromCharCode(0x1b)}\\[([\\d;]+)m`, 'g');
+  let result = '';
+  let lastIndex = 0;
+  let depth = 0;
+  const emitPlain = (text: string): void => {
+    if (text.length === 0) return;
+    result += depth === 0 ? pc.gray(text) : text;
+  };
+  let match: RegExpExecArray | null = ansi.exec(s);
+  while (match !== null) {
+    emitPlain(s.slice(lastIndex, match.index));
+    result += match[0];
+    // Inspect the first parameter of the SGR sequence — picocolors
+    // only emits single-parameter codes, but we accept `;`-separated
+    // lists for forward compatibility by checking the leading number.
+    const leading = (match[1] ?? '').split(';')[0] ?? '';
+    if (leading === '0') {
+      depth = 0;
+    } else if (SGR_CLOSE_CODES.has(leading)) {
+      depth = Math.max(0, depth - 1);
+    } else {
+      depth += 1;
+    }
+    lastIndex = match.index + match[0].length;
+    match = ansi.exec(s);
+  }
+  emitPlain(s.slice(lastIndex));
+  return result;
 }

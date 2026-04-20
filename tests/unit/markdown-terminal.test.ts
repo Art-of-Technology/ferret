@@ -168,4 +168,45 @@ describe('renderMarkdown', () => {
       expectStyled(out, YELLOW_OPEN, '£10');
     });
   });
+
+  describe('dim plain prose', () => {
+    // picocolors emits `\x1b[90m…\x1b[39m` for pc.gray.
+    const GRAY_OPEN = `${ESC}[90m`;
+
+    test('wraps plain-text prose in gray', () => {
+      const out = renderMarkdown('You have no accounts yet.');
+      expectStyled(out, GRAY_OPEN, 'You have no accounts yet.');
+    });
+
+    test('keeps currency vivid (yellow) rather than wrapping it in gray', () => {
+      // Currency spans open inside the surrounding gray run and
+      // close back to gray — so `£247` appears with yellow open,
+      // not gray.
+      const out = renderMarkdown('You spent £247 on dining');
+      if (COLORS_ON) {
+        expect(out).toContain(`${YELLOW_OPEN}£247`);
+        expect(out).toContain(`${GRAY_OPEN}You spent `);
+      }
+    });
+
+    test('does not double-wrap content inside a bold span', () => {
+      // Text inside `**…**` becomes a bold span; wrapping its inner
+      // content in gray would fight the bold style. The check: no
+      // literal `GRAY_OPEN + inner-bold-text` sequence appears.
+      const out = renderMarkdown('lead text **Dishoom** trail text');
+      if (COLORS_ON) {
+        expect(out).not.toContain(`${GRAY_OPEN}Dishoom`);
+        expect(out).toContain(`${ESC}[1mDishoom`);
+        expect(out).toContain(`${GRAY_OPEN}lead text `);
+      }
+    });
+
+    test('stripped output is byte-identical to the logical answer', () => {
+      // Dim-pass adds ANSI codes but no visible characters, so
+      // stripping ANSI recovers the original text for inputs without
+      // markdown structural markers.
+      const logical = 'You spent £42 on Eating Out. (2 visits)';
+      expect(stripAnsi(renderMarkdown(logical))).toBe(logical);
+    });
+  });
 });
