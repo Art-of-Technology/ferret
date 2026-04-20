@@ -121,7 +121,7 @@ export default defineCommand({
       // Single-line progress indicator state. We render one dim hint
       // per tool burst and rewrite it in place on TTY so a 6-call
       // loop doesn't print 6 duplicate `… query_transactions` lines.
-      const progress: ProgressState = { lastTool: null, count: 0, lineOpen: false };
+      const progress = newProgressState();
 
       for await (const event of stream) {
         handleEvent(event, {
@@ -226,15 +226,33 @@ export default defineCommand({
  * hint can update a single stderr line in place rather than printing
  * one dim line per tool call. A 6-query loop now shows
  * `  … query_transactions (×6)` that increments, not six identical
- * duplicates.
+ * duplicates. Exported for unit tests — not part of the command's
+ * public contract.
  */
-interface ProgressState {
+export interface ProgressState {
   /** The tool name currently displayed on the spinner line, or null if none. */
   lastTool: string | null;
-  /** Run count of the current tool burst. Resets when the tool changes. */
+  /**
+   * Number of times the current tool has fired in a row, including
+   * the call currently being rendered. `0` is only valid as the
+   * initial state before the first tool call; the very first
+   * `writeProgress` call sets it to 1 (first render: bare label)
+   * and each subsequent same-tool call increments it (renders
+   * with a `(×N)` suffix once N > 1). `newProgressState()` returns
+   * the canonical pre-burst zero.
+   */
   count: number;
   /** Whether a spinner line is currently on screen without a trailing \n. */
   lineOpen: boolean;
+}
+
+/**
+ * Canonical initial value for ProgressState. Exists so tests (and
+ * the one call site in `run()`) don't duplicate the zero-state shape
+ * and can't drift on which fields default to what.
+ */
+export function newProgressState(): ProgressState {
+  return { lastTool: null, count: 0, lineOpen: false };
 }
 
 interface HandleEventCtx {
@@ -301,8 +319,9 @@ function handleEvent(event: AskEvent, ctx: HandleEventCtx): void {
  * that lets us overwrite the current terminal line without printing
  * a new one. The caller only invokes this on a TTY (see
  * handleEvent) so these escapes always make it to a real terminal.
+ * Exported for unit tests.
  */
-function writeProgress(state: ProgressState, toolName: string): void {
+export function writeProgress(state: ProgressState, toolName: string): void {
   if (state.lastTool === toolName) {
     state.count += 1;
   } else {
@@ -323,9 +342,10 @@ function writeProgress(state: ProgressState, toolName: string): void {
  * Clear any progress line still on screen (called when the tool loop
  * finishes). Without this, the dim hint would still be on the last
  * stderr row when the rendered answer prints to stdout, leaving a
- * stray `  … query_transactions (×6)` above the answer.
+ * stray `  … query_transactions (×6)` above the answer. Exported
+ * for unit tests.
  */
-function clearProgressLine(state: ProgressState): void {
+export function clearProgressLine(state: ProgressState): void {
   if (!state.lineOpen) return;
   if (process.stderr.isTTY) {
     process.stderr.write('\r\x1b[K');
