@@ -162,6 +162,13 @@ export async function* runAsk(opts: RunAskOptions): AsyncIterable<AskEvent> {
 
   let iterations = 0;
   let lastStopReason: ClaudeMessageResponse['stop_reason'] = null;
+  // Track the tail of the most recent text we yielded so we can inject
+  // a paragraph break at iteration boundaries. Without this, narration
+  // from one turn ("…latest month is March 2026.") and the next
+  // turn's answer ("Eating Out — March 2026:") run together with no
+  // whitespace, since Claude does not repeat the separator it assumes
+  // the chat UI will render.
+  let lastYieldedTextTail = '';
 
   while (iterations < maxIterations) {
     if (opts.abortSignal?.aborted) {
@@ -204,10 +211,26 @@ export async function* runAsk(opts: RunAskOptions): AsyncIterable<AskEvent> {
     // tool calls — even tool_use turns can include narrating text.
     const textBlocks: string[] = [];
     const toolUseBlocks: Array<Extract<ClaudeContentBlock, { type: 'tool_use' }>> = [];
+    let firstTextInTurn = true;
     for (const block of resp.content) {
       if (block.type === 'text' && block.text.length > 0) {
         textBlocks.push(block.text);
+        // Inject a paragraph break when the previous iteration left
+        // text un-terminated and this turn is emitting more text.
+        // Only on the first text block of a new turn — blocks within
+        // one turn are consecutive sentences that belong together.
+        if (
+          firstTextInTurn &&
+          lastYieldedTextTail.length > 0 &&
+          !/\n\n$/.test(lastYieldedTextTail)
+        ) {
+          const sep = lastYieldedTextTail.endsWith('\n') ? '\n' : '\n\n';
+          yield { type: 'token', text: sep };
+          lastYieldedTextTail = sep;
+        }
         yield { type: 'token', text: block.text };
+        lastYieldedTextTail = block.text.slice(-2);
+        firstTextInTurn = false;
       } else if (block.type === 'tool_use') {
         toolUseBlocks.push(block);
       }
