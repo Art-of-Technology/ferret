@@ -2,7 +2,10 @@
 import { defineCommand, runMain } from 'citty';
 import pkg from '../package.json' with { type: 'json' };
 import { subCommands } from './commands';
+import { loadFerretEnv } from './lib/env-file';
 import { FerretError } from './lib/errors';
+
+loadFerretEnv();
 
 const main = defineCommand({
   meta: {
