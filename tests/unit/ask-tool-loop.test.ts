@@ -177,9 +177,12 @@ describe('runAsk — tool round trip', () => {
       }),
     );
 
-    // Expect: token, tool_call, tool_result, token, done — in order.
+    // Expect: token, tool_call, tool_result, token (paragraph break
+    // injected between turns), token, done — in order. The separator
+    // ensures narration from the first turn doesn't run straight into
+    // the answer text from the second turn.
     const types = events.map((e) => e.type);
-    expect(types).toEqual(['token', 'tool_call', 'tool_result', 'token', 'done']);
+    expect(types).toEqual(['token', 'tool_call', 'tool_result', 'token', 'token', 'done']);
 
     const call = events.find((e) => e.type === 'tool_call');
     expect(call?.type === 'tool_call' && call.name).toBe('get_account_list');

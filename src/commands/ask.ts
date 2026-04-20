@@ -1,10 +1,13 @@
 // `ferret ask <question>` — natural-language financial query (PRD §4.5).
 //
-// Streams Claude tokens to stdout in default mode; collects them when
-// `--json` is used so the structured payload contains the full answer.
-// `--verbose` echoes tool calls + per-tool summaries to stderr so the
-// user can audit which queries Claude ran without polluting the answer
-// stream.
+// Buffers Claude tokens in default mode and renders markdown → ANSI
+// once the loop finishes, so users see a cleanly formatted answer
+// rather than raw `**bold**` syntax. Tool-call activity surfaces as
+// subtle dim status lines on stderr so the user has feedback while
+// Claude is running tools between turns. `--json` still collects
+// verbatim text (no rendering) so the structured payload stays
+// machine-consumable. `--verbose` keeps its detailed tool-call echo
+// on stderr.
 //
 // SIGINT handling: on Ctrl-C we flip an AbortController so the tool loop
 // exits between iterations rather than ripping out mid-call. Exit code
@@ -18,6 +21,7 @@ import { appendAuditEvent } from '../lib/audit';
 import { loadConfig } from '../lib/config';
 import { FerretError, ValidationError } from '../lib/errors';
 import { formatJson } from '../lib/format';
+import { renderMarkdown } from '../lib/markdown-terminal';
 import { ANTHROPIC_API_KEY, resolveSecret } from '../lib/secrets';
 import { type AskEvent, type BudgetProposal, runAsk } from '../services/ask';
 import { ClaudeClient } from '../services/claude';
@@ -166,9 +170,12 @@ export default defineCommand({
         };
         process.stdout.write(`${formatJson(out)}\n`);
       } else {
-        // Default-mode streamed tokens already wrote as they arrived.
-        // Add a trailing newline so the next shell prompt is on its own line.
-        if (!collected.answer.endsWith('\n')) process.stdout.write('\n');
+        // Render the buffered markdown answer as ANSI-styled text.
+        // Pass a single trailing newline through so the next shell
+        // prompt lands on its own line.
+        const rendered = renderMarkdown(collected.answer);
+        process.stdout.write(rendered);
+        if (!rendered.endsWith('\n')) process.stdout.write('\n');
         if (dedupedProposals.length > 0) {
           renderProposals(dedupedProposals, applyResults);
         }
@@ -195,16 +202,21 @@ interface HandleEventCtx {
 function handleEvent(event: AskEvent, ctx: HandleEventCtx): void {
   switch (event.type) {
     case 'token': {
+      // Buffer only — the final answer is rendered as markdown once
+      // the loop completes so users don't see raw `**bold**` syntax
+      // flickering past.
       ctx.collected.answer += event.text;
-      if (!ctx.wantJson) {
-        process.stdout.write(event.text);
-      }
       break;
     }
     case 'tool_call': {
       ctx.onPendingCall({ name: event.name, input: event.input });
       if (ctx.verbose) {
         consola.info(`tool call: ${event.name} ${safeStringify(event.input)}`);
+      } else if (!ctx.wantJson) {
+        // Non-verbose default: surface a subtle hint on stderr so the
+        // user has feedback during long tool loops without polluting
+        // the stdout answer stream.
+        process.stderr.write(picocolors.dim(`  … ${event.name}\n`));
       }
       break;
     }
