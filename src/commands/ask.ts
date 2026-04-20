@@ -212,10 +212,13 @@ function handleEvent(event: AskEvent, ctx: HandleEventCtx): void {
       ctx.onPendingCall({ name: event.name, input: event.input });
       if (ctx.verbose) {
         consola.info(`tool call: ${event.name} ${safeStringify(event.input)}`);
-      } else if (!ctx.wantJson) {
-        // Non-verbose default: surface a subtle hint on stderr so the
-        // user has feedback during long tool loops without polluting
-        // the stdout answer stream.
+      } else if (!ctx.wantJson && process.stderr.isTTY) {
+        // Non-verbose default on an interactive terminal: surface a
+        // subtle hint on stderr so the user has feedback during long
+        // tool loops without polluting the stdout answer stream.
+        // Skip when stderr is piped or redirected — consumers of the
+        // error stream (log collectors, CI captures) don't benefit
+        // from a progress ticker and would only see noise.
         process.stderr.write(picocolors.dim(`  … ${event.name}\n`));
       }
       break;

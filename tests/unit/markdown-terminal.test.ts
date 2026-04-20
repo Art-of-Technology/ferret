@@ -5,9 +5,12 @@ import { renderMarkdown } from '../../src/lib/markdown-terminal';
 // Strip ANSI escape sequences so assertions on the transformed structure
 // (bullets, headers, currency glyphs) don't depend on color mode. The
 // ESC byte (0x1B) is built from char code to satisfy biome's
-// no-control-characters rule.
+// no-control-characters rule. The pattern accepts multi-parameter SGR
+// sequences (e.g. `ESC[1;33m`) as well as the single-parameter codes
+// picocolors currently emits, so the helper stays robust if the
+// color library ever switches encoding.
 const ESC = String.fromCharCode(0x1b);
-const ANSI_RE = new RegExp(`${ESC}\\[\\d+m`, 'g');
+const ANSI_RE = new RegExp(`${ESC}\\[[\\d;]+m`, 'g');
 function stripAnsi(s: string): string {
   return s.replace(ANSI_RE, '');
 }

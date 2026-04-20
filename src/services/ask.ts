@@ -162,13 +162,18 @@ export async function* runAsk(opts: RunAskOptions): AsyncIterable<AskEvent> {
 
   let iterations = 0;
   let lastStopReason: ClaudeMessageResponse['stop_reason'] = null;
-  // Track the tail of the most recent text we yielded so we can inject
-  // a paragraph break at iteration boundaries. Without this, narration
+  // Track how the most recent yielded text ended so we can inject a
+  // paragraph break at iteration boundaries. Without this, narration
   // from one turn ("…latest month is March 2026.") and the next
   // turn's answer ("Eating Out — March 2026:") run together with no
   // whitespace, since Claude does not repeat the separator it assumes
-  // the chat UI will render.
-  let lastYieldedTextTail = '';
+  // the chat UI will render. We store two booleans derived from
+  // endsWith() rather than a sliced tail so emoji-terminated text
+  // (Claude often closes with 🚨/✅) can't split a UTF-16 surrogate
+  // pair mid-boundary.
+  let hasYieldedText = false;
+  let lastYieldedEndsWithDoubleNewline = false;
+  let lastYieldedEndsWithSingleNewline = false;
 
   while (iterations < maxIterations) {
     if (opts.abortSignal?.aborted) {
@@ -219,17 +224,16 @@ export async function* runAsk(opts: RunAskOptions): AsyncIterable<AskEvent> {
         // text un-terminated and this turn is emitting more text.
         // Only on the first text block of a new turn — blocks within
         // one turn are consecutive sentences that belong together.
-        if (
-          firstTextInTurn &&
-          lastYieldedTextTail.length > 0 &&
-          !/\n\n$/.test(lastYieldedTextTail)
-        ) {
-          const sep = lastYieldedTextTail.endsWith('\n') ? '\n' : '\n\n';
+        if (firstTextInTurn && hasYieldedText && !lastYieldedEndsWithDoubleNewline) {
+          const sep = lastYieldedEndsWithSingleNewline ? '\n' : '\n\n';
           yield { type: 'token', text: sep };
-          lastYieldedTextTail = sep;
+          lastYieldedEndsWithDoubleNewline = true;
+          lastYieldedEndsWithSingleNewline = true;
         }
         yield { type: 'token', text: block.text };
-        lastYieldedTextTail = block.text.slice(-2);
+        hasYieldedText = true;
+        lastYieldedEndsWithDoubleNewline = block.text.endsWith('\n\n');
+        lastYieldedEndsWithSingleNewline = block.text.endsWith('\n');
         firstTextInTurn = false;
       } else if (block.type === 'tool_use') {
         toolUseBlocks.push(block);
