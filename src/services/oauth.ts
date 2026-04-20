@@ -12,7 +12,7 @@
 import { randomBytes } from 'node:crypto';
 import { platform } from 'node:os';
 import ferretSvgRaw from '../ferret.svg' with { type: 'text' };
-import { AuthError, NetworkError } from '../lib/errors';
+import { AuthError, NetworkError, OAuthCancelledError } from '../lib/errors';
 
 export const PORT_MIN = 8000;
 export const PORT_MAX = 9999;
@@ -84,27 +84,62 @@ p{margin:0;color:#9a9a9a;font-size:14px;line-height:1.5;}
 <script>setTimeout(()=>{try{window.close();}catch(e){}},2500);</script>
 </body></html>`;
 
-const ERROR_HTML = (msg: string): string =>
-  `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>ferret — error</title>
+interface ErrorPageOpts {
+  title: string;
+  badge: string;
+  badgeColor: 'red' | 'amber';
+  heading: string;
+  message: string;
+  hint: string;
+}
+
+const ERROR_PAGE = (opts: ErrorPageOpts): string => {
+  const tone =
+    opts.badgeColor === 'amber'
+      ? 'background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.3);color:#fbbf24;'
+      : 'background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);color:#f87171;';
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>ferret — ${escapeHtml(opts.title)}</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
 :root{color-scheme:dark;}
+*{box-sizing:border-box;}
 body{font-family:-apple-system,BlinkMacSystemFont,'Inter',sans-serif;background:radial-gradient(ellipse at top,#161616 0%,#0a0a0a 60%);color:#eaeaea;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:24px;}
-.card{max-width:420px;width:100%;padding:40px 32px;background:#111;border:1px solid #222;border-radius:16px;text-align:center;}
+.card{max-width:420px;width:100%;padding:40px 32px;background:#111;border:1px solid #222;border-radius:16px;text-align:center;box-shadow:0 10px 40px rgba(0,0,0,.4);}
 .logo{margin:0 auto 20px;display:flex;align-items:center;justify-content:center;color:#f97316;}
-.logo svg{width:56px;height:auto;}
-.badge{display:inline-flex;align-items:center;gap:8px;padding:4px 12px;border-radius:999px;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);color:#f87171;font-size:12px;font-weight:500;margin-bottom:16px;}
-h1{margin:0 0 10px;font-size:20px;font-weight:600;}
+.logo svg{width:56px;height:auto;filter:drop-shadow(0 4px 12px rgba(249,115,22,.25));}
+.badge{display:inline-flex;align-items:center;gap:8px;padding:4px 12px;border-radius:999px;${tone}font-size:12px;font-weight:500;margin-bottom:16px;}
+h1{margin:0 0 10px;font-size:22px;font-weight:600;letter-spacing:-.01em;}
 p{margin:0;color:#9a9a9a;font-size:14px;line-height:1.5;word-break:break-word;}
 .hint{margin-top:20px;font-size:12px;color:#666;}
 </style></head>
 <body><div class="card">
 <div class="logo">${LOGO_SVG}</div>
-<div class="badge">connection failed</div>
-<h1>Something went wrong</h1>
-<p>${escapeHtml(msg)}</p>
-<div class="hint">Return to the terminal for details.</div>
+<div class="badge">${escapeHtml(opts.badge)}</div>
+<h1>${escapeHtml(opts.heading)}</h1>
+<p>${escapeHtml(opts.message)}</p>
+<div class="hint">${escapeHtml(opts.hint)}</div>
 </div></body></html>`;
+};
+
+const CANCELLED_HTML = ERROR_PAGE({
+  title: 'cancelled',
+  badge: 'connection cancelled',
+  badgeColor: 'amber',
+  heading: 'No bank was linked',
+  message:
+    'You cancelled the connection in the browser. You can close this tab and try again anytime.',
+  hint: 'ferret · personal finance CLI',
+});
+
+const ERROR_HTML = (msg: string): string =>
+  ERROR_PAGE({
+    title: 'error',
+    badge: 'connection failed',
+    badgeColor: 'red',
+    heading: 'Something went wrong',
+    message: msg,
+    hint: 'Return to the terminal for details.',
+  });
 
 function escapeHtml(s: string): string {
   return s.replace(/[&<>'"`]/g, (c) => `&#${c.charCodeAt(0)};`);
@@ -144,11 +179,21 @@ function startCallbackServer(
       if (url.pathname !== '/callback') {
         return new Response('Not found', { status: 404 });
       }
+      // Defer all settlements so the response body finishes streaming before
+      // the caller's `finally` tears the server down (mirrors the success
+      // path's microtask defer).
       const error = url.searchParams.get('error');
       const errorDescription = url.searchParams.get('error_description');
       if (error) {
+        if (error === 'access_denied') {
+          queueMicrotask(() => reject(new OAuthCancelledError('Link cancelled in browser.')));
+          return new Response(CANCELLED_HTML, {
+            status: 200,
+            headers: { 'content-type': 'text/html; charset=utf-8' },
+          });
+        }
         const msg = errorDescription ? `${error}: ${errorDescription}` : error;
-        reject(new AuthError(`TrueLayer authorization failed — ${msg}`));
+        queueMicrotask(() => reject(new AuthError(`TrueLayer authorization failed — ${msg}`)));
         return new Response(ERROR_HTML(msg), {
           status: 400,
           headers: { 'content-type': 'text/html; charset=utf-8' },
@@ -157,21 +202,21 @@ function startCallbackServer(
       const code = url.searchParams.get('code');
       const state = url.searchParams.get('state');
       if (!code) {
-        reject(new AuthError('TrueLayer callback missing `code` parameter.'));
+        queueMicrotask(() => reject(new AuthError('TrueLayer callback missing `code` parameter.')));
         return new Response(ERROR_HTML('missing code'), {
           status: 400,
           headers: { 'content-type': 'text/html; charset=utf-8' },
         });
       }
       if (!validateState(expectedState, state)) {
-        reject(new AuthError('OAuth state mismatch — possible CSRF. Aborting.'));
+        queueMicrotask(() =>
+          reject(new AuthError('OAuth state mismatch — possible CSRF. Aborting.')),
+        );
         return new Response(ERROR_HTML('state mismatch'), {
           status: 400,
           headers: { 'content-type': 'text/html; charset=utf-8' },
         });
       }
-      // Defer so the success HTML finishes streaming before the caller's
-      // `finally` tears the server down.
       queueMicrotask(() => resolve({ code, state: state as string }));
       return new Response(SUCCESS_HTML, {
         status: 200,

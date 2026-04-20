@@ -16,6 +16,11 @@ export class AuthError extends FerretError {
   override readonly exitCode = 3;
 }
 
+// Signals that the user explicitly cancelled an OAuth flow in the browser
+// (e.g. hit "Cancel" or closed the consent screen). Renders without a stack
+// dump and inherits AuthError's exit code 3 since auth didn't complete.
+export class OAuthCancelledError extends AuthError {}
+
 export class NetworkError extends FerretError {
   override readonly exitCode = 4;
 }
