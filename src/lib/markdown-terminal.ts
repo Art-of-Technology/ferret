@@ -26,11 +26,13 @@
 
 import pc from 'picocolors';
 
-// Sentinel character used to bracket placeholder tokens. The section
-// sign is extremely rare in ordinary user-facing text and printable
-// ASCII, so it avoids both the "control character in regex" lint rule
-// and any realistic risk of colliding with legitimate content.
-const SENTINEL = '\u00A7';
+// Sentinel character used to bracket placeholder tokens. U+E000 sits
+// in the Unicode Private Use Area — it has no assigned meaning and
+// will never appear in ordinary user-facing text (merchant names,
+// currency-formatted amounts, etc.), so it avoids both the
+// "control character in regex" lint rule and any realistic risk of
+// colliding with legitimate content.
+const SENTINEL = '\uE000';
 
 /**
  * Transform markdown-flavored text into ANSI-colored output. Input is
@@ -72,16 +74,21 @@ export function renderMarkdown(input: string): string {
     out = out.replace(re, stash);
   }
 
-  // ATX headings on their own line. We only support H1-H3 because Claude
-  // rarely goes deeper and treating deeper levels the same as H3 adds
-  // noise. Render as bold — ANSI has no dedicated "heading" style.
-  out = out.replace(/^\s*#{1,3}\s+(.+?)\s*$/gm, (_, inner: string) => pc.bold(inner));
+  // ATX headings on their own line. Support H1-H6 so deeper levels
+  // (e.g. `#### subhead`) don't leak raw `#` prefixes when Claude
+  // uses them. ANSI has no dedicated heading styles, so every level
+  // renders as bold. The trailing whitespace class is restricted to
+  // spaces/tabs — `\s` would also match the newline that separates
+  // this line from the next, which would swallow the blank line
+  // after a heading and collapse paragraph breaks.
+  out = out.replace(/^[ \t]*#{1,6}[ \t]+(.+?)[ \t]*$/gm, (_, inner: string) => pc.bold(inner));
 
-  // Bold: **text** and __text__. Lazy match so adjacent bolds on one
-  // line (`**a** and **b**`) render as two separate bolds rather than
-  // one span covering everything between the first and last pair.
-  out = out.replace(/\*\*(.+?)\*\*/gs, (_, inner: string) => pc.bold(inner));
-  out = out.replace(/__(.+?)__/g, (_, inner: string) => pc.bold(inner));
+  // Bold: **text** and __text__. Inner content excludes newlines and
+  // asterisks — multi-line bold isn't something Claude emits, and the
+  // explicit character class makes the match linear (no backtracking),
+  // avoiding the ReDoS shape that `.+?` with the `s` flag would have.
+  out = out.replace(/\*\*([^*\n]+)\*\*/g, (_, inner: string) => pc.bold(inner));
+  out = out.replace(/__([^_\n]+)__/g, (_, inner: string) => pc.bold(inner));
 
   // Inline code: single backticks. Cyan so it doesn't fight the bold
   // style already used for emphasis.
