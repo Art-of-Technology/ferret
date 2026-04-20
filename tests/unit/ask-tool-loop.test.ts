@@ -100,7 +100,7 @@ describe('runAsk — happy path', () => {
     );
     expect(calls).toHaveLength(1);
     const tokens = events.filter((e) => e.type === 'token');
-    expect(tokens).toEqual([{ type: 'token', text: 'hello world' }]);
+    expect(tokens).toEqual([{ type: 'token', text: 'hello world', isFinal: true }]);
     const done = events.find((e) => e.type === 'done');
     expect(done?.type).toBe('done');
     if (done?.type === 'done') {
@@ -183,6 +183,17 @@ describe('runAsk — tool round trip', () => {
     // the answer text from the second turn.
     const types = events.map((e) => e.type);
     expect(types).toEqual(['token', 'tool_call', 'tool_result', 'token', 'token', 'done']);
+
+    // isFinal labeling — interim narration (the first text block,
+    // part of the tool_use turn) is marked non-final so the CLI can
+    // hide it; the terminal turn's text is final. The paragraph
+    // separator between turns inherits the incoming turn's isFinal
+    // so it stays attached to the final answer rather than getting
+    // dropped with the interim narration.
+    const tokens = events.filter((e) => e.type === 'token');
+    expect(tokens[0]).toMatchObject({ text: 'looking up accounts...', isFinal: false });
+    expect(tokens[1]).toMatchObject({ isFinal: true }); // paragraph separator
+    expect(tokens[2]).toMatchObject({ text: 'You have 2 accounts.', isFinal: true });
 
     const call = events.find((e) => e.type === 'tool_call');
     expect(call?.type === 'tool_call' && call.name).toBe('get_account_list');
