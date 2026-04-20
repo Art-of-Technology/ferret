@@ -59,7 +59,19 @@ export const TOOL_RESULT_MAX_CHARS = 8000;
 export type AskEventType = 'token' | 'tool_call' | 'tool_result' | 'done';
 
 export type AskEvent =
-  | { type: 'token'; text: string }
+  | {
+      type: 'token';
+      text: string;
+      /**
+       * True when this token belongs to the terminal turn (stop_reason
+       * other than `tool_use`) — i.e. the final answer. False when
+       * the token is part of interim narration Claude emits between
+       * tool calls. The CLI uses this to render only the final answer
+       * in default mode while still collecting everything for
+       * `--json` output.
+       */
+      isFinal: boolean;
+    }
   | { type: 'tool_call'; name: string; input: unknown }
   | { type: 'tool_result'; name: string; ok: boolean; summary: string }
   | {
@@ -212,6 +224,13 @@ export async function* runAsk(opts: RunAskOptions): AsyncIterable<AskEvent> {
 
     lastStopReason = resp.stop_reason;
 
+    // `isFinal` is true on this assistant turn's text blocks iff the
+    // loop is about to terminate — i.e. Claude didn't ask for more
+    // tools. Callers use this to distinguish the rendered answer
+    // from the "thinking out loud" narration Claude often emits
+    // between tool calls.
+    const isFinalTurn = resp.stop_reason !== 'tool_use';
+
     // Emit any text content from the assistant turn before processing
     // tool calls — even tool_use turns can include narrating text.
     const textBlocks: string[] = [];
@@ -226,11 +245,14 @@ export async function* runAsk(opts: RunAskOptions): AsyncIterable<AskEvent> {
         // one turn are consecutive sentences that belong together.
         if (firstTextInTurn && hasYieldedText && !lastYieldedEndsWithDoubleNewline) {
           const sep = lastYieldedEndsWithSingleNewline ? '\n' : '\n\n';
-          yield { type: 'token', text: sep };
+          // The separator inherits the same isFinal flag as the text
+          // that triggered it so the CLI can keep it with the final
+          // answer rather than dropping it along with interim narration.
+          yield { type: 'token', text: sep, isFinal: isFinalTurn };
           lastYieldedEndsWithDoubleNewline = true;
           lastYieldedEndsWithSingleNewline = true;
         }
-        yield { type: 'token', text: block.text };
+        yield { type: 'token', text: block.text, isFinal: isFinalTurn };
         hasYieldedText = true;
         lastYieldedEndsWithDoubleNewline = block.text.endsWith('\n\n');
         lastYieldedEndsWithSingleNewline = block.text.endsWith('\n');

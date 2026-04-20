@@ -36,7 +36,19 @@ const VERBOSE_PREVIEW_MAX = 240;
 const VERBOSE_PREVIEW_BODY = VERBOSE_PREVIEW_MAX - 3; // "..." suffix budget
 
 interface CollectedAsk {
+  /**
+   * Every text token yielded by the tool loop, concatenated. Includes
+   * interim narration Claude emits between tool calls. Used verbatim
+   * in `--json` mode for backward compatibility.
+   */
   answer: string;
+  /**
+   * Only the tokens from the terminal turn (`isFinal=true`). This is
+   * what default (human) mode renders — intermediate "thinking out
+   * loud" is hidden because it adds noise without carrying the
+   * actual answer.
+   */
+  finalAnswer: string;
   toolsUsed: Array<{ name: string; input: unknown; ok: boolean; summary: string }>;
   iterations: number;
   stopReason: string | null;
@@ -86,6 +98,7 @@ export default defineCommand({
     try {
       const collected: CollectedAsk = {
         answer: '',
+        finalAnswer: '',
         toolsUsed: [],
         iterations: 0,
         stopReason: null,
@@ -105,11 +118,17 @@ export default defineCommand({
       // user is in plain-stream mode; we only echo when verbose is on.
       let pendingCall: { name: string; input: unknown } | null = null;
 
+      // Single-line progress indicator state. We render one dim hint
+      // per tool burst and rewrite it in place on TTY so a 6-call
+      // loop doesn't print 6 duplicate `… query_transactions` lines.
+      const progress: ProgressState = { lastTool: null, count: 0, lineOpen: false };
+
       for await (const event of stream) {
         handleEvent(event, {
           collected,
           wantJson,
           verbose,
+          progress,
           onPendingCall: (e) => {
             pendingCall = e;
           },
@@ -121,6 +140,12 @@ export default defineCommand({
           },
         });
       }
+
+      // If a spinner line is still on screen (no final newline was
+      // emitted because the last tool call was followed only by the
+      // terminating Claude turn), clear it before the rendered answer
+      // lands on stdout — otherwise the answer overwrites the hint.
+      clearProgressLine(progress);
 
       // Audit: one event per ask invocation. Per issue #48 the question
       // text, answer text, and tool inputs/outputs are all omitted — we
@@ -170,10 +195,15 @@ export default defineCommand({
         };
         process.stdout.write(`${formatJson(out)}\n`);
       } else {
-        // Render the buffered markdown answer as ANSI-styled text.
-        // Pass a single trailing newline through so the next shell
-        // prompt lands on its own line.
-        const rendered = renderMarkdown(collected.answer);
+        // Render only the terminal turn's text — Claude's interim
+        // "let me check...", "hmm, let me try...", etc. are interesting
+        // for debugging via --verbose but add noise to the default
+        // output. `finalAnswer` contains only `isFinal=true` tokens.
+        // Fall back to the full buffer if the loop ended without any
+        // final turn (e.g. aborted mid-call) so the user still sees
+        // whatever text Claude managed to produce.
+        const source = collected.finalAnswer.length > 0 ? collected.finalAnswer : collected.answer;
+        const rendered = renderMarkdown(source);
         process.stdout.write(rendered);
         if (!rendered.endsWith('\n')) process.stdout.write('\n');
         if (dedupedProposals.length > 0) {
@@ -191,10 +221,27 @@ export default defineCommand({
   },
 });
 
+/**
+ * State tracked across tool_call events so the non-verbose progress
+ * hint can update a single stderr line in place rather than printing
+ * one dim line per tool call. A 6-query loop now shows
+ * `  … query_transactions (×6)` that increments, not six identical
+ * duplicates.
+ */
+interface ProgressState {
+  /** The tool name currently displayed on the spinner line, or null if none. */
+  lastTool: string | null;
+  /** Run count of the current tool burst. Resets when the tool changes. */
+  count: number;
+  /** Whether a spinner line is currently on screen without a trailing \n. */
+  lineOpen: boolean;
+}
+
 interface HandleEventCtx {
   collected: CollectedAsk;
   wantJson: boolean;
   verbose: boolean;
+  progress: ProgressState;
   onPendingCall: (e: { name: string; input: unknown }) => void;
   consumePendingCall: (ok: boolean, summary: string) => void;
 }
@@ -202,24 +249,30 @@ interface HandleEventCtx {
 function handleEvent(event: AskEvent, ctx: HandleEventCtx): void {
   switch (event.type) {
     case 'token': {
-      // Buffer only — the final answer is rendered as markdown once
-      // the loop completes so users don't see raw `**bold**` syntax
-      // flickering past.
+      // Always collect into `answer` so `--json` mode preserves the
+      // full transcript. Additionally collect into `finalAnswer` when
+      // the orchestrator flags the token as belonging to the terminal
+      // turn; that's the buffer the default (human) render consumes.
       ctx.collected.answer += event.text;
+      if (event.isFinal) ctx.collected.finalAnswer += event.text;
       break;
     }
     case 'tool_call': {
       ctx.onPendingCall({ name: event.name, input: event.input });
       if (ctx.verbose) {
+        // Verbose mode shows each call individually with full input
+        // preview — the spinner-style dedupe would hide information
+        // the user explicitly asked for.
         consola.info(`tool call: ${event.name} ${safeStringify(event.input)}`);
       } else if (!ctx.wantJson && process.stderr.isTTY) {
-        // Non-verbose default on an interactive terminal: surface a
-        // subtle hint on stderr so the user has feedback during long
-        // tool loops without polluting the stdout answer stream.
-        // Skip when stderr is piped or redirected — consumers of the
-        // error stream (log collectors, CI captures) don't benefit
-        // from a progress ticker and would only see noise.
-        process.stderr.write(picocolors.dim(`  … ${event.name}\n`));
+        // Non-verbose default on an interactive terminal: update a
+        // single-line dim hint on stderr. Repeated calls to the same
+        // tool increment a `(×N)` count rewritten in place so a
+        // 6-query loop reads as one line that climbs, not six
+        // duplicates. Non-TTY consumers (log collectors, CI
+        // captures) get silence here — verbose mode is the channel
+        // for that detail.
+        writeProgress(ctx.progress, event.name);
       }
       break;
     }
@@ -240,6 +293,46 @@ function handleEvent(event: AskEvent, ctx: HandleEventCtx): void {
       break;
     }
   }
+}
+
+/**
+ * Emit or update the single-line stderr progress hint. `\r\x1b[K`
+ * is the standard "return to column 0 + erase-to-end-of-line" pair
+ * that lets us overwrite the current terminal line without printing
+ * a new one. The caller only invokes this on a TTY (see
+ * handleEvent) so these escapes always make it to a real terminal.
+ */
+function writeProgress(state: ProgressState, toolName: string): void {
+  if (state.lastTool === toolName) {
+    state.count += 1;
+  } else {
+    // New tool — if a previous spinner was on screen, commit it with
+    // a newline so the new one starts on a fresh line. Each tool
+    // burst thus occupies its own line while repeats within a burst
+    // update in place.
+    if (state.lineOpen) process.stderr.write('\n');
+    state.lastTool = toolName;
+    state.count = 1;
+  }
+  const label = state.count > 1 ? `${toolName} (×${state.count})` : toolName;
+  process.stderr.write(`\r\x1b[K${picocolors.dim(`  … ${label}`)}`);
+  state.lineOpen = true;
+}
+
+/**
+ * Clear any progress line still on screen (called when the tool loop
+ * finishes). Without this, the dim hint would still be on the last
+ * stderr row when the rendered answer prints to stdout, leaving a
+ * stray `  … query_transactions (×6)` above the answer.
+ */
+function clearProgressLine(state: ProgressState): void {
+  if (!state.lineOpen) return;
+  if (process.stderr.isTTY) {
+    process.stderr.write('\r\x1b[K');
+  } else {
+    process.stderr.write('\n');
+  }
+  state.lineOpen = false;
 }
 
 /**
