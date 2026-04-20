@@ -24,19 +24,18 @@ const main = defineCommand({
 // to runMain for --help / --version since they rely on citty's showUsage
 // resolver.
 const rawArgs = process.argv.slice(2);
-const HELP_FLAGS = new Set(['--help', '-h']);
-const isHelp = rawArgs.some((a) => HELP_FLAGS.has(a));
-const isVersion = rawArgs.length === 1 && (rawArgs[0] === '--version' || rawArgs[0] === '-v');
+const META_FLAGS = new Set(['--help', '-h', '--version', '-v']);
+const isMetaInvocation = rawArgs.some((a) => META_FLAGS.has(a));
 
-const execute = isHelp || isVersion ? runMain(main, { rawArgs }) : runCommand(main, { rawArgs });
+const execute = isMetaInvocation ? runMain(main, { rawArgs }) : runCommand(main, { rawArgs });
 
 Promise.resolve(execute).catch((err: unknown) => {
-  if (err instanceof OAuthCancelledError) {
-    process.stderr.write(`${err.message}\n`);
-    process.exit(err.exitCode);
-  }
   if (err instanceof FerretError) {
-    process.stderr.write(`${err.name}: ${err.message}\n`);
+    // OAuthCancelledError is user-initiated (hit "Cancel" in browser) so we
+    // render just the message — no class name prefix, no stack. Every other
+    // FerretError keeps the `Name: message` prefix for grep-ability.
+    const body = err instanceof OAuthCancelledError ? err.message : `${err.name}: ${err.message}`;
+    process.stderr.write(`${body}\n`);
     process.exit(err.exitCode);
   }
   // citty CLIError carries an E_* code; surface the message without the
