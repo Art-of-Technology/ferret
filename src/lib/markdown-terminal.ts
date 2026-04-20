@@ -135,22 +135,26 @@ export function renderMarkdown(input: string): string {
   return dimPlainRuns(out);
 }
 
-// ANSI SGR close codes picocolors emits — `22` (close bold/dim), `23`
-// (italic), `24` (underline), `29` (strikethrough), `39` (default fg),
-// `49` (default bg). `0` is a full reset and collapses depth to zero
-// regardless of current nesting. Anything else is treated as an
-// opening attribute that increments depth.
-const SGR_CLOSE_CODES = new Set(['22', '23', '24', '29', '39', '49']);
+// ANSI SGR close codes actually emitted by picocolors — `22` closes
+// bold and dim together, `29` closes strikethrough, `39` resets the
+// foreground color, `49` resets the background. Italic (`23`) and
+// underline (`24`) are not emitted by picocolors in this codebase, so
+// we deliberately don't list them here; if a future dependency starts
+// emitting them we'll want explicit handling rather than silently
+// decrementing depth.
+const SGR_CLOSE_CODES = new Set(['22', '29', '39', '49']);
 
 /**
  * Wrap depth-0 plain-text runs in `pc.gray` so that un-styled prose
  * renders dim while accent spans (yellow currency, red warnings,
  * bold headings) keep their vivid styling. Tracks ANSI SGR nesting
- * depth by scanning each `ESC[…m` escape: close codes decrement,
- * everything else increments, and a full reset (`ESC[0m`) snaps
- * depth back to zero. Plain text encountered while depth > 0 is
- * emitted verbatim because it already inherits the surrounding
- * style (e.g. the inside of a bold span).
+ * depth by scanning each `ESC[…m` escape and walking every
+ * semicolon-separated parameter: each close parameter decrements
+ * depth, each open parameter increments, and `0` (full reset) snaps
+ * depth back to zero regardless of stack state. Plain text
+ * encountered while depth > 0 is emitted verbatim because it
+ * already inherits the surrounding style (e.g. the inside of a
+ * bold span).
  */
 function dimPlainRuns(s: string): string {
   const ansi = new RegExp(`${String.fromCharCode(0x1b)}\\[([\\d;]+)m`, 'g');
@@ -165,16 +169,19 @@ function dimPlainRuns(s: string): string {
   while (match !== null) {
     emitPlain(s.slice(lastIndex, match.index));
     result += match[0];
-    // Inspect the first parameter of the SGR sequence — picocolors
-    // only emits single-parameter codes, but we accept `;`-separated
-    // lists for forward compatibility by checking the leading number.
-    const leading = (match[1] ?? '').split(';')[0] ?? '';
-    if (leading === '0') {
-      depth = 0;
-    } else if (SGR_CLOSE_CODES.has(leading)) {
-      depth = Math.max(0, depth - 1);
-    } else {
-      depth += 1;
+    // Walk every semicolon-separated parameter. picocolors only
+    // emits single-parameter codes today, but compound sequences
+    // like `ESC[1;33m` (bold + yellow) open TWO styles in one
+    // escape — tracking only the leading parameter would under-count
+    // depth and cause later close codes to leak styling.
+    for (const param of (match[1] ?? '').split(';')) {
+      if (param === '0') {
+        depth = 0;
+      } else if (SGR_CLOSE_CODES.has(param)) {
+        depth = Math.max(0, depth - 1);
+      } else if (param.length > 0) {
+        depth += 1;
+      }
     }
     lastIndex = match.index + match[0].length;
     match = ansi.exec(s);
