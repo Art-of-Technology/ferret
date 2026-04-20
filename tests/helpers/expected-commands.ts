@@ -4,6 +4,7 @@
 
 export const EXPECTED_COMMANDS = [
   'init',
+  'setup',
   'link',
   'unlink',
   'remove',

@@ -21,6 +21,7 @@ import ls from './ls';
 import purge from './purge';
 import remove from './remove';
 import rules from './rules';
+import setup from './setup';
 import sync from './sync';
 import tag from './tag';
 import unlink from './unlink';
@@ -43,6 +44,7 @@ export const subCommands: Record<string, CommandDef<any>> = {
   purge,
   remove,
   rules,
+  setup,
   sync,
   tag,
   unlink,
