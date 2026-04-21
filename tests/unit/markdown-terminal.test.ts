@@ -209,4 +209,89 @@ describe('renderMarkdown', () => {
       expect(stripAnsi(renderMarkdown(logical))).toBe(logical);
     });
   });
+
+  describe('GFM pipe tables', () => {
+    const BOLD_OPEN = `${ESC}[1m`;
+    const YELLOW_OPEN = `${ESC}[33m`;
+
+    test('renders a basic table with padded columns', () => {
+      const input = [
+        '| Category | Total |',
+        '|---|---|',
+        '| Health | £3,142 |',
+        '| Shopping | £1,786 |',
+      ].join('\n');
+      const lines = stripAnsi(renderMarkdown(input)).split('\n');
+      // Header cells, no pipes in the rendered output.
+      expect(lines[0]).not.toContain('|');
+      expect(lines[0]).toContain('Category');
+      expect(lines[0]).toContain('Total');
+      // Second line is the divider made of ─ chars.
+      expect(lines[1]).toMatch(/^─+ +─+$/);
+      // Data rows: cells present, no pipes, column 2 left-aligned by
+      // default so amounts sit at the same start column.
+      expect(lines[2]).not.toContain('|');
+      expect(lines[2]).toContain('Health');
+      expect(lines[2]).toContain('£3,142');
+      expect(lines[3]).toContain('Shopping');
+      expect(lines[3]).toContain('£1,786');
+      // Column alignment: find the index of "£" in each data row —
+      // they should match because the "Total" column is left-aligned
+      // and the header width ("Shopping" = 8) dictates column 1.
+      const col2Start2 = (lines[2] ?? '').indexOf('£');
+      const col2Start3 = (lines[3] ?? '').indexOf('£');
+      expect(col2Start2).toBeGreaterThan(0);
+      expect(col2Start2).toBe(col2Start3);
+    });
+
+    test('right-aligns columns whose delimiter ends with `:`', () => {
+      const input = ['| A | B |', '|---|---:|', '| x | 1 |', '| x | 100 |'].join('\n');
+      const lines = stripAnsi(renderMarkdown(input)).split('\n');
+      // Numbers should end at the same column — their trailing
+      // char index matches.
+      const endOf = (line: string, ch: string): number => line.lastIndexOf(ch);
+      expect(endOf(lines[2] ?? '', '1')).toBe(endOf(lines[3] ?? '', '0'));
+    });
+
+    test('bolds header cells', () => {
+      const input = ['| Category | Total |', '|---|---|', '| Health | £42 |'].join('\n');
+      const out = renderMarkdown(input);
+      if (COLORS_ON) {
+        expect(out).toContain(`${BOLD_OPEN}Category`);
+        expect(out).toContain(`${BOLD_OPEN}Total`);
+      }
+      expect(stripAnsi(out)).not.toContain('**');
+    });
+
+    test('styles currency inside cells with yellow', () => {
+      const input = ['| Cat | Amt |', '|---|---|', '| Health | £3,142 |'].join('\n');
+      const out = renderMarkdown(input);
+      if (COLORS_ON) {
+        expect(out).toContain(`${YELLOW_OPEN}£3,142`);
+      }
+      expect(stripAnsi(out)).toContain('£3,142');
+    });
+
+    test('leaves non-table pipe content alone', () => {
+      const input = 'use | as a pipe, not a table';
+      expect(stripAnsi(renderMarkdown(input))).toBe(input);
+    });
+
+    test('preserves content around a table block', () => {
+      const input = [
+        'Before table.',
+        '',
+        '| A | B |',
+        '|---|---|',
+        '| 1 | 2 |',
+        '',
+        'After table.',
+      ].join('\n');
+      const stripped = stripAnsi(renderMarkdown(input));
+      expect(stripped).toContain('Before table.');
+      expect(stripped).toContain('After table.');
+      expect(stripped).not.toContain('|---|');
+      expect(stripped).not.toContain('| A | B |');
+    });
+  });
 });

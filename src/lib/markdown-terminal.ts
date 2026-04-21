@@ -25,11 +25,14 @@
 // semantics — close codes don't restore an outer color, so naive
 // `pc.gray(entire-string)` would lose gray inside every accent.
 //
-// Not a full markdown parser: links, images, tables, code fences, and
-// block quotes are passed through unchanged because Claude rarely
-// emits them in ask-mode answers. Warning spans are stashed behind
-// placeholders before the other passes run so yellow currency styling
-// doesn't leak inside the red warning segments.
+// Not a full markdown parser: links, images, code fences, and block
+// quotes are passed through unchanged because Claude rarely emits them
+// in ask-mode answers. GFM pipe tables ARE handled (Claude uses them
+// for category breakdowns) — they're expanded to padded columns before
+// the other passes run, so cell contents still get the same bold /
+// currency / warning styling as inline text. Warning spans are stashed
+// behind placeholders before the other passes run so yellow currency
+// styling doesn't leak inside the red warning segments.
 
 import pc from 'picocolors';
 
@@ -53,7 +56,12 @@ const SENTINEL = '\uE000';
  * at the end without their contents being re-styled.
  */
 export function renderMarkdown(input: string): string {
-  let out = input;
+  // Tables first: we convert GFM pipe tables to padded plain-text rows
+  // (plus `**` around header cells) BEFORE the inline passes run, so
+  // cell contents flow through the normal bold / currency / warning
+  // pipeline and stay aligned by visible width regardless of any ANSI
+  // codes those passes later inject.
+  let out = expandTables(input);
   const warnings: string[] = [];
   const stash = (match: string): string => {
     warnings.push(match);
@@ -188,4 +196,149 @@ function dimPlainRuns(s: string): string {
   }
   emitPlain(s.slice(lastIndex));
   return result;
+}
+
+// ---------- GFM pipe tables ----------
+
+type Alignment = 'left' | 'right' | 'center';
+
+/** Spaces between columns. Three keeps adjacent cells visually distinct
+ * without feeling sparse; matches the density of the bullet lists
+ * elsewhere in the renderer. */
+const TABLE_COL_GAP = '   ';
+
+/**
+ * Scan `input` for GFM pipe-table blocks and replace each with a
+ * column-aligned plain-text rendering. Non-table content passes through
+ * unchanged. A table block is a header row (starting and ending with
+ * `|`) followed by a valid delimiter row (`---`, `:---`, `---:`,
+ * `:---:` in each column), followed by zero or more body rows.
+ */
+function expandTables(input: string): string {
+  if (!input.includes('|')) return input;
+  const lines = input.split('\n');
+  const out: string[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    const header = lines[i];
+    const sep = lines[i + 1];
+    if (isTableRow(header) && isDelimiterRow(sep)) {
+      let j = i + 2;
+      const body: string[] = [];
+      while (j < lines.length && isTableRow(lines[j])) {
+        body.push(lines[j] as string);
+        j++;
+      }
+      out.push(renderTableBlock(header as string, sep as string, body));
+      i = j;
+    } else {
+      out.push(header ?? '');
+      i++;
+    }
+  }
+  return out.join('\n');
+}
+
+function isTableRow(s: string | undefined): boolean {
+  if (s === undefined) return false;
+  const t = s.trim();
+  return t.length >= 3 && t.startsWith('|') && t.endsWith('|');
+}
+
+function isDelimiterRow(s: string | undefined): boolean {
+  if (!isTableRow(s)) return false;
+  const cells = splitTableCells(s as string);
+  return cells.length > 0 && cells.every((c) => /^:?-{3,}:?$/.test(c));
+}
+
+function splitTableCells(row: string): string[] {
+  // Strip the outer pipes, then split on interior pipes and trim.
+  const inner = row.trim().slice(1, -1);
+  return inner.split('|').map((c) => c.trim());
+}
+
+function cellAlignment(delimiter: string): Alignment {
+  const hasLeft = delimiter.startsWith(':');
+  const hasRight = delimiter.endsWith(':');
+  if (hasLeft && hasRight) return 'center';
+  if (hasRight) return 'right';
+  return 'left';
+}
+
+function renderTableBlock(header: string, delimiter: string, rows: string[]): string {
+  const headerCells = splitTableCells(header);
+  const delimCells = splitTableCells(delimiter);
+  const bodyCells = rows.map(splitTableCells);
+  const cols = headerCells.length;
+  const aligns: Alignment[] = [];
+  for (let c = 0; c < cols; c++) aligns.push(cellAlignment(delimCells[c] ?? '---'));
+
+  const widths: number[] = [];
+  for (let c = 0; c < cols; c++) {
+    let w = visibleWidth(headerCells[c] ?? '');
+    for (const row of bodyCells) w = Math.max(w, visibleWidth(row[c] ?? ''));
+    widths.push(w);
+  }
+
+  const renderRow = (cells: string[], wrap: (s: string) => string): string => {
+    const parts: string[] = [];
+    for (let c = 0; c < cols; c++) {
+      const padded = padCell(cells[c] ?? '', widths[c] ?? 0, aligns[c] ?? 'left');
+      parts.push(wrap(padded));
+    }
+    return parts.join(TABLE_COL_GAP);
+  };
+
+  const lines: string[] = [];
+  // Header: wrap in `**` so the existing bold pass renders it in bold.
+  // Width math is based on the plain content, so surrounding `**`
+  // contributes no visible width and columns stay aligned.
+  lines.push(renderRow(headerCells, (s) => `**${s}**`));
+  lines.push(widths.map((w) => '─'.repeat(w)).join(TABLE_COL_GAP));
+  for (const row of bodyCells) lines.push(renderRow(row, (s) => s));
+  return lines.join('\n');
+}
+
+function padCell(content: string, width: number, align: Alignment): string {
+  const gap = Math.max(0, width - visibleWidth(content));
+  if (gap === 0) return content;
+  if (align === 'right') return ' '.repeat(gap) + content;
+  if (align === 'center') {
+    const left = Math.floor(gap / 2);
+    return ' '.repeat(left) + content + ' '.repeat(gap - left);
+  }
+  return content + ' '.repeat(gap);
+}
+
+/**
+ * Visible width of a string for terminal alignment: ignores ANSI SGR
+ * escapes and counts CJK / emoji / fullwidth code points as 2 columns.
+ * Not exhaustive (no full East_Asian_Width table) but covers the
+ * category names and currency glyphs ferret actually renders.
+ */
+function visibleWidth(s: string): number {
+  const plain = s.replace(new RegExp(`${String.fromCharCode(0x1b)}\\[[\\d;]+m`, 'g'), '');
+  let w = 0;
+  for (const ch of plain) {
+    const cp = ch.codePointAt(0) ?? 0;
+    w += isWideCodePoint(cp) ? 2 : 1;
+  }
+  return w;
+}
+
+function isWideCodePoint(cp: number): boolean {
+  return (
+    (cp >= 0x1100 && cp <= 0x115f) ||
+    (cp >= 0x2e80 && cp <= 0x303e) ||
+    (cp >= 0x3041 && cp <= 0x33ff) ||
+    (cp >= 0x3400 && cp <= 0x4dbf) ||
+    (cp >= 0x4e00 && cp <= 0x9fff) ||
+    (cp >= 0xa000 && cp <= 0xa4cf) ||
+    (cp >= 0xac00 && cp <= 0xd7a3) ||
+    (cp >= 0xf900 && cp <= 0xfaff) ||
+    (cp >= 0xfe30 && cp <= 0xfe4f) ||
+    (cp >= 0xff00 && cp <= 0xff60) ||
+    (cp >= 0xffe0 && cp <= 0xffe6) ||
+    cp >= 0x1f300
+  );
 }
