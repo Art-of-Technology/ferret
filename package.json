@@ -22,7 +22,7 @@
     "db:migrate": "bun run src/cli.ts init"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.90.0",
+    "@anthropic-ai/sdk": "^0.91.1",
     "citty": "^0.2.2",
     "cli-table3": "^0.6.5",
     "consola": "^3.2.3",
